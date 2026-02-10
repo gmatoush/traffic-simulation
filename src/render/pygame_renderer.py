@@ -1,0 +1,239 @@
+"""Pygame-based renderer for the traffic simulation."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pygame
+
+
+@dataclass
+class PygameRenderer:
+    """Render a top-down view of a single intersection using pygame."""
+
+    width: int = 800
+    height: int = 600
+    road_width: int = 120
+
+    def __post_init__(self) -> None:
+        pygame.display.set_caption("Traffic RL Demo")
+        self.screen = pygame.display.set_mode((self.width, self.height))
+        self.font = pygame.font.Font(None, 24)
+        self._flash_timer = 0.0
+
+    def render(
+        self, world, sim_speed: float | None = None, show_overlays: bool = True
+    ) -> None:
+        """Render the world state without mutating it.
+
+        Args:
+            world: Simulation world containing vehicles and traffic light.
+            sim_speed: Optional simulation speed multiplier for HUD display.
+            show_overlays: Toggle debug overlay rendering.
+        """
+        self._flash_timer += 1.0 / 60.0
+        self._draw_background()
+
+        # Draw a simple cross intersection.
+        horizontal = pygame.Rect(
+            0, self.height // 2 - self.road_width // 2, self.width, self.road_width
+        )
+        vertical = pygame.Rect(
+            self.width // 2 - self.road_width // 2, 0, self.road_width, self.height
+        )
+        pygame.draw.rect(self.screen, self.palette["road"], horizontal)
+        pygame.draw.rect(self.screen, self.palette["road"], vertical)
+        self._draw_lane_markings()
+        # Render vehicles as rectangles.
+        for vehicle in getattr(world, "vehicles", []):
+            rect = self._vehicle_rect(vehicle)
+            color = self._vehicle_color(vehicle)
+            pygame.draw.rect(self.screen, color, rect)
+            pygame.draw.rect(self.screen, (8, 8, 10), rect, width=1)
+
+        # Render central traffic light indicator.
+        light = getattr(world, "traffic_light", None)
+        if light is not None:
+            self._draw_central_traffic_light(light)
+
+        if show_overlays:
+            self._draw_debug_overlays(world, sim_speed)
+
+        pygame.display.flip()
+
+    def _vehicle_rect(self, vehicle) -> pygame.Rect:
+        """Map vehicle position/lane to a rectangle in screen space."""
+        # Scale vehicle size relative to lane width for readability.
+        # Orientation aligns with lane travel: vertical lanes are tall, horizontal lanes are wide.
+        lane = getattr(vehicle, "lane", "horizontal")
+        position = float(getattr(vehicle, "position", 0.0))
+        lane_value = getattr(lane, "value", lane)
+
+        lane_width = self.road_width // 2
+        car_width = max(12, lane_width // 3)
+        car_length = max(20, lane_width // 2)
+
+        if lane_value in ("EAST", "WEST"):
+            width = car_length
+            height = car_width
+        else:
+            width = car_width
+            height = car_length
+
+        center_x = self.width // 2
+        center_y = self.height // 2
+        # Align vehicles to their half of the two-way road (keep center line clear).
+        lane_offset = self.road_width // 6
+        entry_offset = self.road_width // 2 + 30
+
+        if lane_value == "NORTH":
+            x = center_x - lane_offset - width // 2
+            y = int(center_y + position - height // 2)
+        elif lane_value == "SOUTH":
+            x = center_x + lane_offset - width // 2
+            y = int(center_y + position - height // 2)
+        elif lane_value == "EAST":
+            x = int(center_x + position - width // 2)
+            y = center_y - lane_offset - height // 2
+        elif lane_value == "WEST":
+            x = int(center_x + position - width // 2)
+            y = center_y + lane_offset - height // 2
+        else:
+            x = int(center_x - self.road_width // 2 + position)
+            y = center_y - height // 2
+
+        return pygame.Rect(x, y, width, height)
+
+    def _vehicle_color(self, vehicle) -> tuple[int, int, int]:
+        """Pick a color based on vehicle type."""
+        name = vehicle.__class__.__name__
+        if name == "EmergencyVehicle":
+            return self._flashing_emergency_color()
+        return self.palette["vehicle"]
+
+    def _traffic_light_colors(self, light) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+        """Map traffic light phase to north-south and east-west colors."""
+        phase = getattr(light, "current_phase", "ns_green")
+        phase_value = getattr(phase, "value", phase)
+
+        green = self.palette["green"]
+        yellow = self.palette["yellow"]
+        red = self.palette["red"]
+
+        if phase_value == "ns_green":
+            return green, red
+        if phase_value == "ns_yellow":
+            return yellow, red
+        if phase_value == "ew_green":
+            return red, green
+        if phase_value == "ew_yellow":
+            return red, yellow
+        return red, red
+
+    def _draw_central_traffic_light(self, light) -> None:
+        center_x = self.width // 2
+        center_y = self.height // 2
+        ns_color, ew_color = self._traffic_light_colors(light)
+
+        # Four single-bulb lights (top/bottom for NS, left/right for EW).
+        radius = 8
+        offset = 28
+        # NS controls top/bottom, EW controls left/right.
+        self._draw_light_box(center_x, center_y - offset, ns_color, radius)
+        self._draw_light_box(center_x, center_y + offset, ns_color, radius)
+        self._draw_light_box(center_x - offset, center_y, ew_color, radius)
+        self._draw_light_box(center_x + offset, center_y, ew_color, radius)
+
+
+    def _phase_to_signal_color(self, phase_value: str) -> tuple[int, int, int]:
+        if phase_value in ("ns_green", "ew_green"):
+            return (70, 220, 120)
+        if phase_value in ("ns_yellow", "ew_yellow"):
+            return (250, 200, 60)
+        return (235, 60, 60)
+
+    def _draw_light_box(
+        self, x: int, y: int, color: tuple[int, int, int], radius: int
+    ) -> None:
+        """Draw a single light with its own compact black housing."""
+        box_size = radius * 3
+        box = pygame.Rect(x - box_size // 2, y - box_size // 2, box_size, box_size)
+        pygame.draw.rect(self.screen, (8, 8, 10), box, border_radius=4)
+        pygame.draw.rect(self.screen, (50, 50, 58), box, width=1, border_radius=4)
+        pygame.draw.circle(self.screen, color, (x, y), radius)
+
+    def _draw_debug_overlays(self, world, sim_speed: float | None) -> None:
+        light = getattr(world, "traffic_light", None)
+        phase = getattr(light, "current_phase", None)
+        phase_value = getattr(phase, "value", phase)
+        emergency_active = False
+        if hasattr(world, "emergency_waiting"):
+            emergency_active = bool(world.emergency_waiting())
+
+        lines = [
+            f"Phase: {phase_value}",
+            f"Speed: {sim_speed:.2f}x" if sim_speed is not None else "Speed: n/a",
+            f"Emergency: {'YES' if emergency_active else 'NO'}",
+        ]
+
+        x = 12
+        y = 10
+        for line in lines:
+            surface = self.font.render(line, True, self.palette["hud_text"])
+            self.screen.blit(surface, (x, y))
+            y += 18
+
+
+    def _draw_background(self) -> None:
+        self.palette = {
+            "asphalt": (22, 26, 34),
+            "road": (46, 52, 64),
+            "lane_mark": (210, 210, 210),
+            "lane_mark_dim": (160, 160, 160),
+            "vehicle": (88, 170, 240),
+            "green": (70, 210, 120),
+            "yellow": (240, 200, 90),
+            "red": (225, 80, 80),
+            "hud_text": (235, 235, 235),
+        }
+        self.screen.fill(self.palette["asphalt"])
+
+        # Subtle vignette
+        vignette = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        vignette.fill((0, 0, 0, 60))
+        pygame.draw.rect(
+            vignette,
+            (0, 0, 0, 0),
+            pygame.Rect(60, 60, self.width - 120, self.height - 120),
+        )
+        self.screen.blit(vignette, (0, 0))
+
+    def _draw_lane_markings(self) -> None:
+        center_x = self.width // 2
+        center_y = self.height // 2
+        # Single solid yellow center lines for two-way roads.
+        center_color = (230, 200, 60)
+        center_width = 4
+
+        # North-south road center line.
+        pygame.draw.line(
+            self.screen,
+            center_color,
+            (center_x, 0),
+            (center_x, self.height),
+            center_width,
+        )
+
+        # East-west road center line.
+        pygame.draw.line(
+            self.screen,
+            center_color,
+            (0, center_y),
+            (self.width, center_y),
+            center_width,
+        )
+
+    def _flashing_emergency_color(self) -> tuple[int, int, int]:
+        # Simple flash between red and white.
+        pulse = int(self._flash_timer * 6) % 2
+        return (240, 70, 70) if pulse == 0 else (240, 240, 240)

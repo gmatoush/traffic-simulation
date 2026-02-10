@@ -60,6 +60,8 @@ class World:
         default_factory=lambda: {lane: 0.0 for lane in Lane}
     )
     crash_events: int = 0
+    emergency_enabled: bool = True
+    risk_factor: float = 0.0
     traffic_light: object | None = None
     time: float = 0.0
 
@@ -322,6 +324,7 @@ class World:
                     speed = random.uniform(12.0, 16.0)
                     gap = random.uniform(self.min_follow_gap * 0.9, self.min_follow_gap * 1.1)
                 gap = max(self.min_follow_gap, gap)
+                speed *= 1.0 + 0.75 * self.risk_factor
                 if queue:
                     direction = self._lane_direction(lane)
                     tail_pos = min(
@@ -352,6 +355,8 @@ class World:
 
     def spawn_emergency_vehicles(self) -> None:
         """Spawn emergency vehicles randomly at low probability."""
+        if not self.emergency_enabled:
+            return
         for lane, probability in self.emergency_spawn_probabilities.items():
             if random.random() < probability:
                 position = -self.entry_distance if lane in (Lane.NORTH, Lane.WEST) else self.entry_distance
@@ -360,6 +365,7 @@ class World:
                 gap = random.uniform(self.min_follow_gap * 1.1, self.min_follow_gap * 1.4)
                 gap = max(self.min_follow_gap, gap)
                 speed = random.uniform(18.0, 24.0)
+                speed *= 1.0 + 0.75 * self.risk_factor
                 if queue:
                     direction = self._lane_direction(lane)
                     tail_pos = min(

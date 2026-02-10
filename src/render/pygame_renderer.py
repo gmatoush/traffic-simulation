@@ -61,7 +61,11 @@ class PygameRenderer:
         return sprites
 
     def render(
-        self, world, sim_speed: float | None = None, show_overlays: bool = True
+        self,
+        world,
+        sim_speed: float | None = None,
+        show_overlays: bool = True,
+        controls: dict | None = None,
     ) -> None:
         """Render the world state without mutating it.
 
@@ -69,6 +73,7 @@ class PygameRenderer:
             world: Simulation world containing vehicles and traffic light.
             sim_speed: Optional simulation speed multiplier for HUD display.
             show_overlays: Toggle debug overlay rendering.
+            controls: Optional UI control state for on-screen sliders/toggles.
         """
         self._flash_timer += 1.0 / 60.0
         self._draw_background()
@@ -100,8 +105,8 @@ class PygameRenderer:
         if light is not None:
             self._draw_central_traffic_light(light)
 
-        if show_overlays:
-            self._draw_debug_overlays(world, sim_speed)
+        if controls is not None:
+            self._draw_controls(controls)
 
         pygame.display.flip()
 
@@ -236,26 +241,41 @@ class PygameRenderer:
         pygame.draw.rect(self.screen, (50, 50, 58), box, width=1, border_radius=4)
         pygame.draw.circle(self.screen, color, (x, y), radius)
 
-    def _draw_debug_overlays(self, world, sim_speed: float | None) -> None:
-        light = getattr(world, "traffic_light", None)
-        phase = getattr(light, "current_phase", None)
-        phase_value = getattr(phase, "value", phase)
-        emergency_active = False
-        if hasattr(world, "emergency_waiting"):
-            emergency_active = bool(world.emergency_waiting())
+    def _draw_controls(self, controls: dict) -> None:
+        """Draw on-screen sliders/toggles for runtime control."""
+        panel_w = 280
+        panel_h = 160
+        x = self.width - panel_w - 12
+        y = 12
+        panel = pygame.Rect(x, y, panel_w, panel_h)
+        pygame.draw.rect(self.screen, (15, 18, 24), panel, border_radius=6)
+        pygame.draw.rect(self.screen, (60, 60, 70), panel, width=1, border_radius=6)
 
-        lines = [
-            f"Phase: {phase_value}",
-            f"Speed: {sim_speed:.2f}x" if sim_speed is not None else "Speed: n/a",
-            f"Emergency: {'YES' if emergency_active else 'NO'}",
-        ]
+        speed = float(controls.get("speed", 1.0))
+        risk_label = str(controls.get("risk_label", "LOW")).upper()
+        emergency = bool(controls.get("emergency", True))
+        phase_label = str(controls.get("phase", ""))
 
-        x = 12
-        y = 10
-        for line in lines:
-            surface = self.font.render(line, True, self.palette["hud_text"])
-            self.screen.blit(surface, (x, y))
-            y += 18
+        label_color = self.palette["hud_text"]
+        self.screen.blit(self.font.render(f"Speed: {speed:.2f}x", True, label_color), (x + 10, y + 8))
+        self.screen.blit(self.font.render("Risk", True, label_color), (x + 10, y + 44))
+        self.screen.blit(self.font.render(f"Risk: {risk_label}", True, label_color), (x + 120, y + 44))
+        em_text = "Emergency: ON" if emergency else "Emergency: OFF"
+        self.screen.blit(self.font.render(em_text, True, label_color), (x + 10, y + 78))
+        # Phase display removed per request.
+
+        self._draw_slider(x + 90, y + 18, 160, speed, 0.5, 2.0)
+        # Risk is a toggle (LOW/MED/HIGH), so no slider is drawn.
+
+    def _draw_slider(
+        self, x: int, y: int, width: int, value: float, vmin: float, vmax: float
+    ) -> None:
+        track = pygame.Rect(x, y + 6, width, 4)
+        pygame.draw.rect(self.screen, (70, 70, 80), track, border_radius=2)
+        t = 0.0 if vmax == vmin else (value - vmin) / (vmax - vmin)
+        t = max(0.0, min(1.0, t))
+        knob_x = x + int(t * width)
+        pygame.draw.circle(self.screen, (230, 230, 230), (knob_x, y + 8), 6)
 
 
     def _draw_background(self) -> None:

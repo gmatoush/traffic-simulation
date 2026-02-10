@@ -55,6 +55,7 @@ class World:
     min_follow_gap: float = 55.0
     max_spawns_per_lane_per_tick: int = 4
     lane_offset: float = 30.0
+    render_road_width: float = 120.0
     crash_freeze_duration: float = 5.0
     lane_freeze_timers: Dict[Lane, float] = field(
         default_factory=lambda: {lane: 0.0 for lane in Lane}
@@ -62,6 +63,7 @@ class World:
     crash_events: int = 0
     emergency_enabled: bool = True
     risk_factor: float = 0.0
+    max_vehicles: int = 20
     traffic_light: object | None = None
     time: float = 0.0
 
@@ -82,6 +84,8 @@ class World:
 
     def enqueue_vehicle(self, vehicle: object, lane: Lane) -> None:
         """Add a vehicle to a lane queue and register it with the world."""
+        if len(self.vehicles) >= self.max_vehicles:
+            return
         if hasattr(vehicle, "lane"):
             setattr(vehicle, "lane", lane)
 
@@ -135,6 +139,12 @@ class World:
         lane = getattr(vehicle, "lane", None)
         lane_value = getattr(lane, "value", lane)
         pos = float(getattr(vehicle, "position", 0.0))
+        # Keep collision box aligned with render sizing.
+        lane_width = self.render_road_width / 2.0
+        car_width = max(18.0, lane_width * 0.8)
+        car_length = max(28.0, lane_width * 1.2)
+        setattr(vehicle, "width", car_width)
+        setattr(vehicle, "length", car_length)
         if lane_value == "NORTH":
             setattr(vehicle, "center_x", -self.lane_offset)
             setattr(vehicle, "center_y", pos)
@@ -152,12 +162,9 @@ class World:
         return self.lane_freeze_timers.get(lane, 0.0) > 0.0
 
     def _register_crash(self, vehicle_a: object, vehicle_b: object) -> None:
-        lane_a = getattr(vehicle_a, "lane", None)
-        lane_b = getattr(vehicle_b, "lane", None)
-        if isinstance(lane_a, Lane):
-            self.lane_freeze_timers[lane_a] = self.crash_freeze_duration
-        if isinstance(lane_b, Lane):
-            self.lane_freeze_timers[lane_b] = self.crash_freeze_duration
+        # Crash counts for all lanes whenever any sprites collide.
+        for lane in Lane:
+            self.lane_freeze_timers[lane] = self.crash_freeze_duration
         self.crash_events += 1
 
     def _update_freeze_timers(self, dt: float) -> None:
@@ -171,6 +178,8 @@ class World:
         # After the freeze window, delete any vehicles that are still crashed or touching.
         touching: set[int] = set()
         vehicles = list(self.vehicles)
+        if len(vehicles) <= 1:
+            return
         for i in range(len(vehicles)):
             v1 = vehicles[i]
             lane1 = getattr(v1, "lane", None)
@@ -307,6 +316,8 @@ class World:
         """Spawn cars randomly per lane based on configured probabilities."""
         for lane, probability in self.car_spawn_probabilities.items():
             for _ in range(self.max_spawns_per_lane_per_tick):
+                if len(self.vehicles) >= self.max_vehicles:
+                    return
                 if random.random() >= probability:
                     continue
                 position = -self.entry_distance if lane in (Lane.NORTH, Lane.WEST) else self.entry_distance
@@ -315,10 +326,10 @@ class World:
                 entry_direction, exit_direction = self._lane_directions(lane)
                 speed_category = random.choice(["slow", "medium", "fast"])
                 if speed_category == "slow":
-                    speed = random.uniform(8.0, 12.0)
+                    speed = random.uniform(5.0, 8.0)
                     gap = random.uniform(self.min_follow_gap * 0.6, self.min_follow_gap * 0.8)
                 elif speed_category == "fast":
-                    speed = random.uniform(16.0, 22.0)
+                    speed = random.uniform(22.0, 30.0)
                     gap = random.uniform(self.min_follow_gap * 1.2, self.min_follow_gap * 1.5)
                 else:
                     speed = random.uniform(12.0, 16.0)
@@ -358,6 +369,8 @@ class World:
         if not self.emergency_enabled:
             return
         for lane, probability in self.emergency_spawn_probabilities.items():
+            if len(self.vehicles) >= self.max_vehicles:
+                return
             if random.random() < probability:
                 position = -self.entry_distance if lane in (Lane.NORTH, Lane.WEST) else self.entry_distance
                 queue = self.lane_queues[lane]
@@ -476,6 +489,8 @@ class World:
     def _detect_collisions(self) -> None:
         """Crash vehicles when any two overlap in world space."""
         vehicles = list(self.vehicles)
+        if len(vehicles) <= 1:
+            return
         for i in range(len(vehicles)):
             v1 = vehicles[i]
             if getattr(v1, "crashed", False):

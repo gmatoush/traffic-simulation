@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 from config.sim_config import HEADLESS_STEPS, RENDER_ENABLED, RENDER_SPEED, SIM_DT
 from sim.clock import SimulationClock
 from sim.traffic_light import TrafficLight
@@ -20,11 +22,14 @@ def main() -> None:
 
     import pygame
     from render.pygame_renderer import PygameRenderer
+    from env.traffic_env import TrafficEnv
+    from stable_baselines3 import DQN
+    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.vec_env import DummyVecEnv
 
     pygame.init()
     renderer = PygameRenderer()
     frame_clock = pygame.time.Clock()
-    sim_accumulator = 0.0
     running = True
     paused = False
     show_overlays = True
@@ -33,6 +38,41 @@ def main() -> None:
     risk_levels = ["LOW", "MED", "HIGH"]
     risk_index = 0
     emergency_enabled = True
+
+    class LiveTrainingCallback(BaseCallback):
+        def __init__(self) -> None:
+            super().__init__()
+            self.step_rewards = deque(maxlen=100)
+            self.episode_return = 0.0
+
+        def _on_step(self) -> bool:
+            rewards = self.locals.get("rewards", [0.0])
+            dones = self.locals.get("dones", [False])
+            reward = float(rewards[0]) if rewards is not None else 0.0
+            self.step_rewards.append(reward)
+            self.episode_return += reward
+            if dones[0]:
+                self.episode_return = 0.0
+            return True
+
+        def avg_reward(self) -> float:
+            if not self.step_rewards:
+                return 0.0
+            return sum(self.step_rewards) / len(self.step_rewards)
+
+    live_env = DummyVecEnv([lambda: TrafficEnv(render_enabled=False, max_steps=10**9)])
+    model = DQN(
+        "MultiInputPolicy",
+        live_env,
+        verbose=0,
+        buffer_size=2000,
+        learning_starts=50,
+        batch_size=32,
+        train_freq=1,
+        gradient_steps=1,
+    )
+    train_cb = LiveTrainingCallback()
+    train_accum = 0.0
 
     while running:
         real_dt = frame_clock.tick(60) / 1000.0
@@ -80,15 +120,19 @@ def main() -> None:
 
         sim_clock.speed = ui_speed
         risk_value = [0.0, 0.5, 1.0][risk_index]
-        world.risk_factor = risk_value
-        world.emergency_enabled = emergency_enabled
 
         if not paused:
-            sim_accumulator += real_dt * sim_clock.speed
-            while sim_accumulator >= sim_clock.dt:
-                world.update(sim_clock.tick())
-                sim_accumulator -= sim_clock.dt
+            train_accum += real_dt * sim_clock.speed
+            while train_accum >= sim_clock.dt:
+                env_world = live_env.envs[0].world
+                env_world.risk_factor = risk_value
+                env_world.emergency_enabled = emergency_enabled
+                model.learn(total_timesteps=1, reset_num_timesteps=False, callback=train_cb)
+                world = env_world
+                train_accum -= sim_clock.dt
 
+        stopped = [v for v in world.vehicles if getattr(v, "wait_time", 0.0) > 0.0]
+        avg_wait = sum(v.wait_time for v in stopped) / len(stopped) if stopped else 0.0
         renderer.render(
             world,
             sim_speed=sim_clock.speed,
@@ -97,6 +141,11 @@ def main() -> None:
                 "speed": ui_speed,
                 "risk_label": risk_levels[risk_index],
                 "emergency": emergency_enabled,
+            },
+            stats={
+                "avg_wait": avg_wait,
+                "elapsed": world.time,
+                "learning": train_cb.avg_reward(),
             },
         )
 

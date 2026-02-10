@@ -66,6 +66,7 @@ class PygameRenderer:
         sim_speed: float | None = None,
         show_overlays: bool = True,
         controls: dict | None = None,
+        stats: dict | None = None,
     ) -> None:
         """Render the world state without mutating it.
 
@@ -74,6 +75,7 @@ class PygameRenderer:
             sim_speed: Optional simulation speed multiplier for HUD display.
             show_overlays: Toggle debug overlay rendering.
             controls: Optional UI control state for on-screen sliders/toggles.
+            stats: Optional stats for left-side display.
         """
         self._flash_timer += 1.0 / 60.0
         self._draw_background()
@@ -94,11 +96,17 @@ class PygameRenderer:
             if any(self._sprite_pool.values()):
                 sprite = self._get_vehicle_sprite(vehicle)
                 sprite = self._orient_and_scale_sprite(sprite, rect, vehicle)
+                if getattr(vehicle, "crashed", False):
+                    sprite = self._dim_sprite(sprite)
                 self.screen.blit(sprite, rect.topleft)
             else:
                 color = self._vehicle_color(vehicle)
+                if getattr(vehicle, "crashed", False):
+                    color = (90, 90, 90)
                 pygame.draw.rect(self.screen, color, rect)
                 pygame.draw.rect(self.screen, (8, 8, 10), rect, width=1)
+
+        self._draw_crash_effects(world)
 
         # Render central traffic light indicator.
         light = getattr(world, "traffic_light", None)
@@ -107,6 +115,8 @@ class PygameRenderer:
 
         if controls is not None:
             self._draw_controls(controls)
+        if stats is not None:
+            self._draw_left_stats(stats)
 
         pygame.display.flip()
 
@@ -190,6 +200,13 @@ class PygameRenderer:
         scaled = pygame.transform.smoothscale(oriented, (rect.width, rect.height))
         return scaled
 
+    def _dim_sprite(self, sprite: pygame.Surface) -> pygame.Surface:
+        dimmed = sprite.copy()
+        overlay = pygame.Surface(dimmed.get_size(), pygame.SRCALPHA)
+        overlay.fill((60, 60, 60, 160))
+        dimmed.blit(overlay, (0, 0))
+        return dimmed
+
     def _traffic_light_colors(self, light) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
         """Map traffic light phase to north-south and east-west colors."""
         phase = getattr(light, "current_phase", "ns_green")
@@ -267,6 +284,51 @@ class PygameRenderer:
         self._draw_slider(x + 90, y + 18, 160, speed, 0.5, 2.0)
         # Risk is a toggle (LOW/MED/HIGH), so no slider is drawn.
 
+    def _draw_left_stats(self, stats: dict) -> None:
+        """Draw key metrics on the upper-left."""
+        x = 12
+        y = 10
+        avg_wait = stats.get("avg_wait", None)
+        learn = stats.get("learning", None)
+        elapsed = stats.get("elapsed", None)
+
+        if elapsed is not None:
+            big_font = pygame.font.Font(None, 40)
+            surface = big_font.render(f"Elapsed: {elapsed:.1f}s", True, self.palette["hud_text"])
+            self.screen.blit(surface, (x, y))
+            y += 34
+
+        lines = []
+        if avg_wait is not None:
+            lines.append(f"Avg stopped wait: {avg_wait:.2f}s")
+        if learn is not None:
+            lines.append(f"Avg reward(100): {learn:.2f}")
+        for line in lines:
+            surface = self.font.render(line, True, self.palette["hud_text"])
+            self.screen.blit(surface, (x, y))
+            y += 18
+
+    def _draw_crash_effects(self, world) -> None:
+        """Draw crash indicators for crashed vehicles."""
+        vehicles = getattr(world, "vehicles", [])
+        if not vehicles:
+            return
+        for vehicle in vehicles:
+            if not getattr(vehicle, "crashed", False):
+                continue
+            lane = getattr(vehicle, "lane", None)
+            timer = 0.0
+            if lane is not None and hasattr(world, "lane_freeze_timers"):
+                timer = float(world.lane_freeze_timers.get(lane, 0.0))
+            if timer <= 0.0:
+                continue
+            rect = self._vehicle_rect(vehicle)
+            cx, cy = rect.center
+            size = max(rect.width, rect.height) // 2 + 6
+            color = (220, 60, 60)
+            pygame.draw.line(self.screen, color, (cx - size, cy - size), (cx + size, cy + size), 3)
+            pygame.draw.line(self.screen, color, (cx - size, cy + size), (cx + size, cy - size), 3)
+
     def _draw_slider(
         self, x: int, y: int, width: int, value: float, vmin: float, vmax: float
     ) -> None:
@@ -305,27 +367,35 @@ class PygameRenderer:
     def _draw_lane_markings(self) -> None:
         center_x = self.width // 2
         center_y = self.height // 2
-        # Single solid yellow center lines for two-way roads.
+        # Dashed yellow center lines for two-way roads.
         center_color = (230, 200, 60)
         center_width = 4
+        dash = 18
+        gap = 14
 
-        # North-south road center line.
-        pygame.draw.line(
-            self.screen,
-            center_color,
-            (center_x, 0),
-            (center_x, self.height),
-            center_width,
-        )
+        # North-south dashed center line.
+        y = 0
+        while y < self.height:
+            pygame.draw.line(
+                self.screen,
+                center_color,
+                (center_x, y),
+                (center_x, min(self.height, y + dash)),
+                center_width,
+            )
+            y += dash + gap
 
-        # East-west road center line.
-        pygame.draw.line(
-            self.screen,
-            center_color,
-            (0, center_y),
-            (self.width, center_y),
-            center_width,
-        )
+        # East-west dashed center line.
+        x = 0
+        while x < self.width:
+            pygame.draw.line(
+                self.screen,
+                center_color,
+                (x, center_y),
+                (min(self.width, x + dash), center_y),
+                center_width,
+            )
+            x += dash + gap
 
     def _flashing_emergency_color(self) -> tuple[int, int, int]:
         # Simple flash between red and white.

@@ -26,6 +26,10 @@ class Vehicle:
     length: float = 18.0
     width: float = 10.0
     min_gap: float = 28.0
+    sprite_kind: str = "normal"
+    sprite_category: str = "medium"
+    center_x: float = 0.0
+    center_y: float = 0.0
     crashed: bool = False
 
     def update(self, dt: float, stopped: bool = False, move_step: float = 1.0) -> None:

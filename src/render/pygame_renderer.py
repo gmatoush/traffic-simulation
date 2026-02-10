@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import random
 
 import pygame
 
@@ -17,9 +19,46 @@ class PygameRenderer:
 
     def __post_init__(self) -> None:
         pygame.display.set_caption("Traffic RL Demo")
-        self.screen = pygame.display.set_mode((self.width, self.height))
+        self.screen = pygame.display.set_mode(
+            (self.width, self.height), pygame.RESIZABLE
+        )
         self.font = pygame.font.Font(None, 24)
         self._flash_timer = 0.0
+        self._vehicle_sprites: dict[int, pygame.Surface] = {}
+        self._sprite_pool: dict[str, list[pygame.Surface]] = {}
+        self._load_vehicle_sprites()
+
+    def resize(self, width: int, height: int) -> None:
+        self.width = max(480, int(width))
+        self.height = max(360, int(height))
+        self.screen = pygame.display.set_mode(
+            (self.width, self.height), pygame.RESIZABLE
+        )
+
+    def _load_vehicle_sprites(self) -> None:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        cars_dir = os.path.join(base_dir, "assets", "cars")
+        normal_dir = os.path.join(cars_dir, "normal_cars")
+        emergency_dir = os.path.join(cars_dir, "emergency")
+        self._sprite_pool = {
+            "slow": self._load_sprite_dir(os.path.join(normal_dir, "slow")),
+            "medium": self._load_sprite_dir(os.path.join(normal_dir, "medium")),
+            "fast": self._load_sprite_dir(os.path.join(normal_dir, "fast")),
+            "emergency": self._load_sprite_dir(emergency_dir),
+        }
+
+    def _load_sprite_dir(self, directory: str) -> list[pygame.Surface]:
+        if not os.path.isdir(directory):
+            return []
+        sprites: list[pygame.Surface] = []
+        for name in os.listdir(directory):
+            if name.lower().endswith(".png"):
+                path = os.path.join(directory, name)
+                try:
+                    sprites.append(pygame.image.load(path).convert_alpha())
+                except pygame.error:
+                    continue
+        return sprites
 
     def render(
         self, world, sim_speed: float | None = None, show_overlays: bool = True
@@ -44,12 +83,17 @@ class PygameRenderer:
         pygame.draw.rect(self.screen, self.palette["road"], horizontal)
         pygame.draw.rect(self.screen, self.palette["road"], vertical)
         self._draw_lane_markings()
-        # Render vehicles as rectangles.
+        # Render vehicles as sprites (fallback to rectangles if none loaded).
         for vehicle in getattr(world, "vehicles", []):
             rect = self._vehicle_rect(vehicle)
-            color = self._vehicle_color(vehicle)
-            pygame.draw.rect(self.screen, color, rect)
-            pygame.draw.rect(self.screen, (8, 8, 10), rect, width=1)
+            if any(self._sprite_pool.values()):
+                sprite = self._get_vehicle_sprite(vehicle)
+                sprite = self._orient_and_scale_sprite(sprite, rect, vehicle)
+                self.screen.blit(sprite, rect.topleft)
+            else:
+                color = self._vehicle_color(vehicle)
+                pygame.draw.rect(self.screen, color, rect)
+                pygame.draw.rect(self.screen, (8, 8, 10), rect, width=1)
 
         # Render central traffic light indicator.
         light = getattr(world, "traffic_light", None)
@@ -70,8 +114,8 @@ class PygameRenderer:
         lane_value = getattr(lane, "value", lane)
 
         lane_width = self.road_width // 2
-        car_width = max(12, lane_width // 3)
-        car_length = max(20, lane_width // 2)
+        car_width = max(18, int(lane_width * 0.8))
+        car_length = max(28, int(lane_width * 1.2))
 
         if lane_value in ("EAST", "WEST"):
             width = car_length
@@ -83,7 +127,7 @@ class PygameRenderer:
         center_x = self.width // 2
         center_y = self.height // 2
         # Align vehicles to their half of the two-way road (keep center line clear).
-        lane_offset = self.road_width // 6
+        lane_offset = 30
         entry_offset = self.road_width // 2 + 30
 
         if lane_value == "NORTH":
@@ -110,6 +154,36 @@ class PygameRenderer:
         if name == "EmergencyVehicle":
             return self._flashing_emergency_color()
         return self.palette["vehicle"]
+
+    def _get_vehicle_sprite(self, vehicle) -> pygame.Surface:
+        key = id(vehicle)
+        if key not in self._vehicle_sprites:
+            kind = getattr(vehicle, "sprite_kind", "normal")
+            category = getattr(vehicle, "sprite_category", "medium")
+            pool = self._sprite_pool.get("emergency" if kind == "emergency" else category, [])
+            if not pool:
+                fallback = []
+                for sprites in self._sprite_pool.values():
+                    fallback.extend(sprites)
+                pool = fallback
+            self._vehicle_sprites[key] = random.choice(pool)
+        return self._vehicle_sprites[key]
+
+    def _orient_and_scale_sprite(
+        self, sprite: pygame.Surface, rect: pygame.Rect, vehicle
+    ) -> pygame.Surface:
+        lane = getattr(vehicle, "lane", None)
+        lane_value = getattr(lane, "value", lane)
+        oriented = sprite
+        # Sprites are vertical; rotate/flip based on travel direction.
+        if lane_value == "NORTH":
+            oriented = pygame.transform.rotate(oriented, 180)
+        elif lane_value == "EAST":
+            oriented = pygame.transform.rotate(oriented, 90)
+        elif lane_value == "WEST":
+            oriented = pygame.transform.rotate(oriented, -90)
+        scaled = pygame.transform.smoothscale(oriented, (rect.width, rect.height))
+        return scaled
 
     def _traffic_light_colors(self, light) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
         """Map traffic light phase to north-south and east-west colors."""

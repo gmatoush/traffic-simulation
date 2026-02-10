@@ -52,9 +52,9 @@ class World:
     exit_distance: float = 240.0
     # Stop line is placed before the intersection to prevent entering on red.
     stop_line_distance: float = 80.0
-    min_follow_gap: float = 28.0
+    min_follow_gap: float = 55.0
     max_spawns_per_lane_per_tick: int = 4
-    lane_offset: float = 12.0
+    lane_offset: float = 30.0
     crash_freeze_duration: float = 5.0
     lane_freeze_timers: Dict[Lane, float] = field(
         default_factory=lambda: {lane: 0.0 for lane in Lane}
@@ -127,6 +127,24 @@ class World:
         if lane in (Lane.NORTH, Lane.WEST):
             return -self.stop_line_distance
         return self.stop_line_distance
+
+    def _update_vehicle_center(self, vehicle: object) -> None:
+        """Update center-of-mass coordinates based on lane and position."""
+        lane = getattr(vehicle, "lane", None)
+        lane_value = getattr(lane, "value", lane)
+        pos = float(getattr(vehicle, "position", 0.0))
+        if lane_value == "NORTH":
+            setattr(vehicle, "center_x", -self.lane_offset)
+            setattr(vehicle, "center_y", pos)
+        elif lane_value == "SOUTH":
+            setattr(vehicle, "center_x", self.lane_offset)
+            setattr(vehicle, "center_y", pos)
+        elif lane_value == "EAST":
+            setattr(vehicle, "center_x", pos)
+            setattr(vehicle, "center_y", -self.lane_offset)
+        elif lane_value == "WEST":
+            setattr(vehicle, "center_x", pos)
+            setattr(vehicle, "center_y", self.lane_offset)
 
     def _lane_frozen(self, lane: Lane) -> bool:
         return self.lane_freeze_timers.get(lane, 0.0) > 0.0
@@ -222,36 +240,40 @@ class World:
             # to (lead.length + follower.min_gap). This prevents overlap at all speeds.
             if lead_pos is not None and lead_vehicle is not None:
                 lead_length = float(getattr(lead_vehicle, "length", 0.0))
+                follower_length = float(getattr(vehicle, "length", 0.0))
                 follower_gap = float(getattr(vehicle, "min_gap", self.min_follow_gap))
+                lead_back = lead_pos - direction * (lead_length / 2.0)
+                # Enforce gap using the follower's back vs. the lead's back.
                 if direction > 0:
-                    separator_pos = lead_pos - (lead_length + follower_gap)
+                    separator_pos = lead_back - (follower_gap + follower_length / 2.0)
                     if target > separator_pos:
                         target = separator_pos
                         stopped = target == position
                 else:
-                    separator_pos = lead_pos + (lead_length + follower_gap)
+                    separator_pos = lead_back + (follower_gap + follower_length / 2.0)
                     if target < separator_pos:
                         target = separator_pos
                         stopped = target == position
             # Stop line logic:
             # On red, vehicles must stop at the stop line and never enter the intersection.
             # On yellow, vehicles already past the stop line may continue; others must stop.
+            front_pos = position + direction * (float(getattr(vehicle, "length", 0.0)) / 2.0)
             can_proceed = lane_signal == "green"
             if lane_signal == "yellow":
                 if direction > 0:
-                    can_proceed = position > stop_line
+                    can_proceed = front_pos > stop_line
                 else:
-                    can_proceed = position < stop_line
+                    can_proceed = front_pos < stop_line
 
             if not can_proceed:
                 if direction > 0:
-                    if position <= stop_line:
-                        target = min(target, stop_line)
+                    if front_pos <= stop_line:
+                        target = min(target, stop_line - direction * (float(getattr(vehicle, "length", 0.0)) / 2.0))
                         stopped = target == position
                     # If already past stop line, allow continued movement.
                 else:
-                    if position >= stop_line:
-                        target = max(target, stop_line)
+                    if front_pos >= stop_line:
+                        target = max(target, stop_line - direction * (float(getattr(vehicle, "length", 0.0)) / 2.0))
                         stopped = target == position
 
             move_step = target - position
@@ -259,6 +281,7 @@ class World:
                 if abs(move_step) < 1e-6:
                     stopped = True
                 vehicle.update(dt, stopped=stopped, move_step=move_step)
+                self._update_vehicle_center(vehicle)
 
             lead_pos = target
             lead_vehicle = vehicle
@@ -288,8 +311,17 @@ class World:
                 # If the entry is occupied, stack new spawns behind the last vehicle.
                 queue = self.lane_queues[lane]
                 entry_direction, exit_direction = self._lane_directions(lane)
-                gap = random.uniform(self.min_follow_gap * 0.8, self.min_follow_gap * 1.4)
-                speed = random.uniform(6.0, 10.0)
+                speed_category = random.choice(["slow", "medium", "fast"])
+                if speed_category == "slow":
+                    speed = random.uniform(8.0, 12.0)
+                    gap = random.uniform(self.min_follow_gap * 0.6, self.min_follow_gap * 0.8)
+                elif speed_category == "fast":
+                    speed = random.uniform(16.0, 22.0)
+                    gap = random.uniform(self.min_follow_gap * 1.2, self.min_follow_gap * 1.5)
+                else:
+                    speed = random.uniform(12.0, 16.0)
+                    gap = random.uniform(self.min_follow_gap * 0.9, self.min_follow_gap * 1.1)
+                gap = max(self.min_follow_gap, gap)
                 if queue:
                     direction = self._lane_direction(lane)
                     tail_pos = min(
@@ -299,7 +331,7 @@ class World:
                         (getattr(v, "position", position) for v in queue),
                         default=position,
                     )
-                    spawn_gap = self.min_follow_gap * 1.05
+                    spawn_gap = self.min_follow_gap * 1.5
                     if direction > 0:
                         position = tail_pos - spawn_gap
                     else:
@@ -312,8 +344,11 @@ class World:
                     entry_direction=entry_direction,
                     exit_direction=exit_direction,
                     min_gap=gap,
+                    sprite_kind="normal",
+                    sprite_category=speed_category,
                 )
                 self.enqueue_vehicle(car, lane)
+                self._update_vehicle_center(car)
 
     def spawn_emergency_vehicles(self) -> None:
         """Spawn emergency vehicles randomly at low probability."""
@@ -322,8 +357,9 @@ class World:
                 position = -self.entry_distance if lane in (Lane.NORTH, Lane.WEST) else self.entry_distance
                 queue = self.lane_queues[lane]
                 entry_direction, exit_direction = self._lane_directions(lane)
-                gap = random.uniform(self.min_follow_gap * 0.8, self.min_follow_gap * 1.4)
-                speed = random.uniform(10.0, 14.0)
+                gap = random.uniform(self.min_follow_gap * 1.1, self.min_follow_gap * 1.4)
+                gap = max(self.min_follow_gap, gap)
+                speed = random.uniform(18.0, 24.0)
                 if queue:
                     direction = self._lane_direction(lane)
                     tail_pos = min(
@@ -333,7 +369,7 @@ class World:
                         (getattr(v, "position", position) for v in queue),
                         default=position,
                     )
-                    spawn_gap = self.min_follow_gap * 1.05
+                    spawn_gap = self.min_follow_gap * 1.5
                     if direction > 0:
                         position = tail_pos - spawn_gap
                     else:
@@ -346,8 +382,11 @@ class World:
                     entry_direction=entry_direction,
                     exit_direction=exit_direction,
                     min_gap=gap,
+                    sprite_kind="emergency",
+                    sprite_category="emergency",
                 )
                 self.enqueue_vehicle(vehicle, lane)
+                self._update_vehicle_center(vehicle)
 
 
     def emergency_waiting(self) -> bool:

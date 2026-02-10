@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SRC = os.path.join(ROOT, "src")
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
 from config.sim_config import RL_ALGO, RL_MODEL_PATH, RL_TRAIN_TIMESTEPS
 from env.traffic_env import TrafficEnv
 
@@ -15,7 +23,10 @@ def train(algo: str = RL_ALGO, timesteps: int = RL_TRAIN_TIMESTEPS, model_path: 
             "stable-baselines3 is required for training. Install it before running."
         ) from exc
 
-    env = TrafficEnv(render_enabled=False, max_steps=timesteps)
+    from stable_baselines3.common.vec_env import DummyVecEnv
+
+    # Headless training: no rendering and no artificial pacing.
+    env = DummyVecEnv([lambda: TrafficEnv(render_enabled=False, max_steps=10**9)])
 
     if algo == "PPO":
         model = PPO("MultiInputPolicy", env, verbose=1)
@@ -24,7 +35,7 @@ def train(algo: str = RL_ALGO, timesteps: int = RL_TRAIN_TIMESTEPS, model_path: 
     else:
         raise ValueError(f"Unsupported RL algorithm: {algo}")
 
-    model.learn(total_timesteps=timesteps)
+    model.learn(total_timesteps=timesteps, progress_bar=False)
     model.save(model_path)
 
 

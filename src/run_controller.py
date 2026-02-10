@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 from config.sim_config import (
     BASELINE_PHASE_DURATION,
     CONTROLLER_MODE,
@@ -16,10 +18,41 @@ from rl.rl_controller import RLController
 
 
 def run() -> None:
-    env = TrafficEnv(render_enabled=RENDER_ENABLED, max_steps=HEADLESS_STEPS)
+    parser = argparse.ArgumentParser(description="Run a controller with optional rendering.")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Disable rendering for fastest execution.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["baseline", "rl"],
+        default=CONTROLLER_MODE.lower(),
+        help="Controller mode to run.",
+    )
+    parser.add_argument(
+        "--algo",
+        default=RL_ALGO,
+        help="RL algorithm (e.g., DQN or PPO).",
+    )
+    parser.add_argument(
+        "--model-path",
+        default=RL_MODEL_PATH,
+        help="Path to a saved RL model.",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=HEADLESS_STEPS,
+        help="Maximum number of steps to run.",
+    )
+    args = parser.parse_args()
+
+    render_enabled = RENDER_ENABLED and not args.headless
+    env = TrafficEnv(render_enabled=render_enabled, max_steps=args.steps)
     obs, _ = env.reset()
 
-    mode = CONTROLLER_MODE.lower()
+    mode = args.mode
     if mode == "baseline":
         controller = FixedTimeController(phase_duration=BASELINE_PHASE_DURATION)
         controller.reset()
@@ -27,16 +60,16 @@ def run() -> None:
         while True:
             action = controller.act(env.dt)
             obs, _, terminated, truncated, _ = env.step(action)
-            if RENDER_ENABLED:
+            if render_enabled:
                 env.render()
             if terminated or truncated:
                 break
     elif mode == "rl":
-        controller = RLController(algo=RL_ALGO, model_path=RL_MODEL_PATH)
+        controller = RLController(algo=args.algo, model_path=args.model_path)
         while True:
             action = controller.act(obs)
             obs, _, terminated, truncated, _ = env.step(action)
-            if RENDER_ENABLED:
+            if render_enabled:
                 env.render()
             if terminated or truncated:
                 break

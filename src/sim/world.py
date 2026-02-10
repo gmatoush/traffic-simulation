@@ -64,12 +64,19 @@ class World:
     emergency_enabled: bool = True
     risk_factor: float = 0.0
     max_vehicles: int = 20
+    emergency_spawn_timer: float = 0.0
+    emergency_spawn_interval: float = 0.0
     traffic_light: object | None = None
     time: float = 0.0
 
     def __post_init__(self) -> None:
         self._validate_spawn_probabilities(self.car_spawn_probabilities, Lane)
         self._validate_spawn_probabilities(self.emergency_spawn_probabilities, Lane)
+        self._reset_emergency_timer()
+
+    def _reset_emergency_timer(self) -> None:
+        self.emergency_spawn_timer = 0.0
+        self.emergency_spawn_interval = random.uniform(0.0, 30.0)
 
     @staticmethod
     def _validate_spawn_probabilities(
@@ -314,9 +321,11 @@ class World:
 
     def spawn_cars(self) -> None:
         """Spawn cars randomly per lane based on configured probabilities."""
+        # Reserve a slot for emergencies so the toggle can actually spawn them.
+        effective_max = self.max_vehicles - (1 if self.emergency_enabled else 0)
         for lane, probability in self.car_spawn_probabilities.items():
             for _ in range(self.max_spawns_per_lane_per_tick):
-                if len(self.vehicles) >= self.max_vehicles:
+                if len(self.vehicles) >= effective_max:
                     return
                 if random.random() >= probability:
                     continue
@@ -368,44 +377,47 @@ class World:
         """Spawn emergency vehicles randomly at low probability."""
         if not self.emergency_enabled:
             return
-        for lane, probability in self.emergency_spawn_probabilities.items():
-            if len(self.vehicles) >= self.max_vehicles:
-                return
-            if random.random() < probability:
-                position = -self.entry_distance if lane in (Lane.NORTH, Lane.WEST) else self.entry_distance
-                queue = self.lane_queues[lane]
-                entry_direction, exit_direction = self._lane_directions(lane)
-                gap = random.uniform(self.min_follow_gap * 1.1, self.min_follow_gap * 1.4)
-                gap = max(self.min_follow_gap, gap)
-                speed = random.uniform(18.0, 24.0)
-                speed *= 1.0 + 0.75 * self.risk_factor
-                if queue:
-                    direction = self._lane_direction(lane)
-                    tail_pos = min(
-                        (getattr(v, "position", position) for v in queue),
-                        default=position,
-                    ) if direction > 0 else max(
-                        (getattr(v, "position", position) for v in queue),
-                        default=position,
-                    )
-                    spawn_gap = self.min_follow_gap * 1.5
-                    if direction > 0:
-                        position = tail_pos - spawn_gap
-                    else:
-                        position = tail_pos + spawn_gap
-                vehicle = EmergencyVehicle(
-                    speed=speed,
-                    position=position,
-                    wait_time=0.0,
-                    lane=lane,
-                    entry_direction=entry_direction,
-                    exit_direction=exit_direction,
-                    min_gap=gap,
-                    sprite_kind="emergency",
-                    sprite_category="emergency",
-                )
-                self.enqueue_vehicle(vehicle, lane)
-                self._update_vehicle_center(vehicle)
+        if self.emergency_spawn_timer < self.emergency_spawn_interval:
+            return
+        if len(self.vehicles) >= self.max_vehicles:
+            return
+
+        lane = random.choice(list(Lane))
+        position = -self.entry_distance if lane in (Lane.NORTH, Lane.WEST) else self.entry_distance
+        queue = self.lane_queues[lane]
+        entry_direction, exit_direction = self._lane_directions(lane)
+        gap = random.uniform(self.min_follow_gap * 1.1, self.min_follow_gap * 1.4)
+        gap = max(self.min_follow_gap, gap)
+        speed = random.uniform(18.0, 24.0)
+        speed *= 1.0 + 0.75 * self.risk_factor
+        if queue:
+            direction = self._lane_direction(lane)
+            tail_pos = min(
+                (getattr(v, "position", position) for v in queue),
+                default=position,
+            ) if direction > 0 else max(
+                (getattr(v, "position", position) for v in queue),
+                default=position,
+            )
+            spawn_gap = self.min_follow_gap * 1.5
+            if direction > 0:
+                position = tail_pos - spawn_gap
+            else:
+                position = tail_pos + spawn_gap
+        vehicle = EmergencyVehicle(
+            speed=speed,
+            position=position,
+            wait_time=0.0,
+            lane=lane,
+            entry_direction=entry_direction,
+            exit_direction=exit_direction,
+            min_gap=gap,
+            sprite_kind="emergency",
+            sprite_category="emergency",
+        )
+        self.enqueue_vehicle(vehicle, lane)
+        self._update_vehicle_center(vehicle)
+        self._reset_emergency_timer()
 
 
     def emergency_waiting(self) -> bool:
@@ -441,6 +453,8 @@ class World:
             raise ValueError("dt must be positive")
 
         self.time += dt
+        if self.emergency_enabled:
+            self.emergency_spawn_timer += dt
         self.spawn_cars()
         self.spawn_emergency_vehicles()
 

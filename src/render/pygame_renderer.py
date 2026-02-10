@@ -18,15 +18,18 @@ class PygameRenderer:
     road_width: int = 120
 
     def __post_init__(self) -> None:
-        pygame.display.set_caption("Traffic RL Demo")
+        pygame.display.set_caption("Traffic Simulator")
         self.screen = pygame.display.set_mode(
             (self.width, self.height), pygame.RESIZABLE
         )
+        self._set_window_icon()
         self.font = pygame.font.Font(None, 24)
         self._flash_timer = 0.0
         self._vehicle_sprites: dict[int, pygame.Surface] = {}
         self._sprite_pool: dict[str, list[pygame.Surface]] = {}
+        self._control_icons: dict[str, pygame.Surface] = {}
         self._load_vehicle_sprites()
+        self._load_control_icons()
 
     def resize(self, width: int, height: int) -> None:
         self.width = max(480, int(width))
@@ -46,6 +49,32 @@ class PygameRenderer:
             "fast": self._load_sprite_dir(os.path.join(normal_dir, "fast")),
             "emergency": self._load_sprite_dir(emergency_dir),
         }
+
+    def _load_control_icons(self) -> None:
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        play_path = os.path.join(base_dir, "assets", "start_button.png")
+        stop_path = os.path.join(base_dir, "assets", "stop_button.png")
+        icons: dict[str, pygame.Surface] = {}
+        try:
+            if os.path.isfile(play_path):
+                icons["play"] = pygame.image.load(play_path).convert_alpha()
+            if os.path.isfile(stop_path):
+                icons["stop"] = pygame.image.load(stop_path).convert_alpha()
+        except pygame.error:
+            icons = {}
+        self._control_icons = icons
+
+    def _set_window_icon(self) -> None:
+        """Set the pygame window icon if an app icon is available."""
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        icon_path = os.path.join(base_dir, "assets", "app_icon.png")
+        if not os.path.isfile(icon_path):
+            return
+        try:
+            icon = pygame.image.load(icon_path).convert_alpha()
+        except pygame.error:
+            return
+        pygame.display.set_icon(icon)
 
     def _load_sprite_dir(self, directory: str) -> list[pygame.Surface]:
         if not os.path.isdir(directory):
@@ -93,6 +122,8 @@ class PygameRenderer:
         # Render vehicles as sprites (fallback to rectangles if none loaded).
         for vehicle in getattr(world, "vehicles", []):
             rect = self._vehicle_rect(vehicle)
+            if vehicle.__class__.__name__ == "EmergencyVehicle":
+                self._draw_emergency_glow(rect)
             if any(self._sprite_pool.values()):
                 sprite = self._get_vehicle_sprite(vehicle)
                 sprite = self._orient_and_scale_sprite(sprite, rect, vehicle)
@@ -261,7 +292,7 @@ class PygameRenderer:
     def _draw_controls(self, controls: dict) -> None:
         """Draw on-screen sliders/toggles for runtime control."""
         panel_w = 280
-        panel_h = 160
+        panel_h = 230
         x = self.width - panel_w - 12
         y = 12
         panel = pygame.Rect(x, y, panel_w, panel_h)
@@ -270,24 +301,32 @@ class PygameRenderer:
 
         speed = float(controls.get("speed", 1.0))
         risk_label = str(controls.get("risk_label", "LOW")).upper()
-        emergency = bool(controls.get("emergency", True))
         phase_label = str(controls.get("phase", ""))
 
         label_color = self.palette["hud_text"]
         self.screen.blit(self.font.render(f"Speed: {speed:.2f}x", True, label_color), (x + 10, y + 8))
-        self.screen.blit(self.font.render("Risk", True, label_color), (x + 10, y + 44))
-        self.screen.blit(self.font.render(f"Risk: {risk_label}", True, label_color), (x + 120, y + 44))
-        em_text = "Emergency: ON" if emergency else "Emergency: OFF"
-        self.screen.blit(self.font.render(em_text, True, label_color), (x + 10, y + 78))
+        self.screen.blit(self.font.render("Spawn Rate", True, label_color), (x + 10, y + 44))
+        self.screen.blit(self.font.render(f"Spawn Rate: {risk_label}", True, label_color), (x + 120, y + 44))
         # Phase display removed per request.
 
         self._draw_slider(x + 90, y + 18, 160, speed, 0.5, 2.0)
         # Risk is a toggle (LOW/MED/HIGH), so no slider is drawn.
+        self._draw_icon_button(x + 10, y + 82, 120, 44, "play")
+        self._draw_icon_button(x + 150, y + 82, 120, 44, "stop")
+        self._draw_button(x + 10, y + 142, 120, 28, "Save Model")
+        self._draw_button(x + 150, y + 142, 120, 28, "Load Model")
 
     def _draw_left_stats(self, stats: dict) -> None:
         """Draw key metrics on the upper-left."""
+        panel_w = 260
+        panel_h = 120
         x = 12
-        y = 10
+        y = 12
+        panel = pygame.Rect(x, y, panel_w, panel_h)
+        pygame.draw.rect(self.screen, (15, 18, 24), panel, border_radius=6)
+        pygame.draw.rect(self.screen, (60, 60, 70), panel, width=1, border_radius=6)
+        x += 10
+        y += 8
         avg_wait = stats.get("avg_wait", None)
         learn = stats.get("learning", None)
         elapsed = stats.get("elapsed", None)
@@ -338,6 +377,23 @@ class PygameRenderer:
         t = max(0.0, min(1.0, t))
         knob_x = x + int(t * width)
         pygame.draw.circle(self.screen, (230, 230, 230), (knob_x, y + 8), 6)
+
+    def _draw_button(self, x: int, y: int, width: int, height: int, label: str) -> None:
+        rect = pygame.Rect(x, y, width, height)
+        pygame.draw.rect(self.screen, (24, 28, 36), rect, border_radius=6)
+        pygame.draw.rect(self.screen, (70, 70, 80), rect, width=1, border_radius=6)
+        text = self.font.render(label, True, self.palette["hud_text"])
+        text_rect = text.get_rect(center=rect.center)
+        self.screen.blit(text, text_rect)
+
+    def _draw_icon_button(self, x: int, y: int, width: int, height: int, icon: str) -> None:
+        rect = pygame.Rect(x, y, width, height)
+        sprite = self._control_icons.get(icon)
+        if sprite is None:
+            return
+        target = pygame.transform.smoothscale(sprite, (height, height))
+        icon_rect = target.get_rect(center=rect.center)
+        self.screen.blit(target, icon_rect)
 
 
     def _draw_background(self) -> None:
@@ -398,6 +454,18 @@ class PygameRenderer:
             x += dash + gap
 
     def _flashing_emergency_color(self) -> tuple[int, int, int]:
-        # Simple flash between red and white.
+        # Flash between red and blue.
         pulse = int(self._flash_timer * 6) % 2
-        return (240, 70, 70) if pulse == 0 else (240, 240, 240)
+        return (240, 70, 70) if pulse == 0 else (60, 120, 240)
+
+    def _draw_emergency_glow(self, rect: pygame.Rect) -> None:
+        """Draw a faint circular red/blue glow that fades toward the edges."""
+        color = self._flashing_emergency_color()
+        radius = max(rect.width, rect.height) // 2 + 8
+        size = radius * 2
+        glow = pygame.Surface((size, size), pygame.SRCALPHA)
+        # Radial falloff using concentric circles to keep a smooth fade.
+        for r in range(radius, 0, -4):
+            alpha = int(70 * (r / radius))
+            pygame.draw.circle(glow, (*color, alpha), (radius, radius), r)
+        self.screen.blit(glow, (rect.centerx - radius, rect.centery - radius))

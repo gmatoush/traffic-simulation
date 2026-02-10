@@ -47,7 +47,8 @@ def _is_name_key(key: str | None) -> bool:
 
 
 def train(algo: str = RL_ALGO, timesteps: int = RL_TRAIN_TIMESTEPS, model_path: str = RL_MODEL_PATH) -> None:
-    algo = algo.upper()
+    # Keep headless training fully compatible with the rendered UI model.
+    algo = "DQN"
     try:
         from stable_baselines3 import DQN, PPO
     except ImportError as exc:  # pragma: no cover - runtime dependency
@@ -58,35 +59,88 @@ def train(algo: str = RL_ALGO, timesteps: int = RL_TRAIN_TIMESTEPS, model_path: 
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     # Headless training: no rendering and no artificial pacing.
-    env = DummyVecEnv([lambda: TrafficEnv(render_enabled=False, max_steps=10**9)])
+    # Use finite episodes and loop forever across episodes.
+    episode_length = 5000
+    env = DummyVecEnv([lambda: TrafficEnv(render_enabled=False, max_steps=episode_length)])
     models_dir = os.path.dirname(model_path) or os.getcwd()
+    checkpoint_dir = os.path.join(models_dir, "checkpoint")
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
-    if algo == "PPO":
-        model = PPO("MultiInputPolicy", env, verbose=0)
-    elif algo == "DQN":
-        model = DQN("MultiInputPolicy", env, verbose=0)
-    else:
-        raise ValueError(f"Unsupported RL algorithm: {algo}")
+    model = DQN(
+        "MultiInputPolicy",
+        env,
+        verbose=0,
+        buffer_size=5000,
+        learning_starts=100,
+        batch_size=32,
+        train_freq=1,
+        gradient_steps=1,
+    )
 
     print("Training headless. Press 'y' to stop and save. Press 's' for stats. Press 'n' to set filename.")
     steps = 0
     last_avg_reward = 0.0
+    best_avg_reward = float("-inf")
+    reward_buffer: list[float] = []
+    checkpoint_best_path = os.path.join(checkpoint_dir, "best_model.zip")
+    checkpoint_latest_path = os.path.join(checkpoint_dir, "latest_model.zip")
+    checkpoint_interval_episodes = 5
+
+    class RewardTracker:
+        def __init__(self, buf):
+            self.buf = buf
+
+        def __call__(self, locals_, globals_):
+            rewards = locals_.get("rewards", None)
+            if rewards is not None:
+                try:
+                    self.buf.append(float(rewards[0]))
+                    if len(self.buf) > 2000:
+                        self.buf.pop(0)
+                except Exception:
+                    pass
+            return True
+
+    reward_cb = RewardTracker(reward_buffer)
     while True:
-        model.learn(total_timesteps=256, reset_num_timesteps=False, progress_bar=False)
-        steps += 256
+        # Train in full-episode chunks so loops align to episode boundaries.
+        model.learn(
+            total_timesteps=episode_length,
+            reset_num_timesteps=False,
+            progress_bar=False,
+            callback=reward_cb,
+        )
+        steps += episode_length
+        avg_reward = _compute_avg_reward(model, last_avg_reward)
+        if reward_buffer:
+            avg_reward = sum(reward_buffer) / len(reward_buffer)
+        last_avg_reward = avg_reward
+
+        if avg_reward > best_avg_reward:
+            best_avg_reward = avg_reward
+            try:
+                model.save(checkpoint_best_path)
+            except Exception:
+                pass
+        if (steps // episode_length) % checkpoint_interval_episodes == 0:
+            try:
+                model.save(checkpoint_latest_path)
+            except Exception:
+                pass
+
         key = _read_key()
         if _is_name_key(key):
             new_name = input("Enter model filename (without extension): ").strip()
             if new_name:
                 model_path = os.path.join(models_dir, f"{new_name}.zip")
         if _is_stats_key(key):
-            avg_reward = _compute_avg_reward(model, last_avg_reward)
-            last_avg_reward = avg_reward
             print("\n" * 35)
             print("Press 'y' to stop and save. Press 's' for stats. Press 'n' to set filename.")
-            print(f"Steps: {steps}")
-            print(f"Avg reward: {avg_reward:.2f}")
+            print(f"Episodes: {steps // episode_length}")
+            print(f"Avg reward (rolling): {avg_reward:.2f}")
             print(f"Model path: {model_path}")
+            print(f"Checkpoint best: {checkpoint_best_path}")
+            print(f"Checkpoint latest: {checkpoint_latest_path}")
         if _is_stop_key(key):
             break
     model.save(model_path)

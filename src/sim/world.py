@@ -63,6 +63,8 @@ class World:
     crash_events: int = 0
     emergency_enabled: bool = True
     risk_factor: float = 0.0
+    uniform_speed_enabled: bool = False
+    uniform_speed_value: float = 26.0
     max_vehicles: int = 20
     emergency_spawn_timer: float = 0.0
     emergency_spawn_interval: float = 0.0
@@ -333,19 +335,25 @@ class World:
                 # If the entry is occupied, stack new spawns behind the last vehicle.
                 queue = self.lane_queues[lane]
                 entry_direction, exit_direction = self._lane_directions(lane)
-                speed_category = random.choice(["slow", "medium", "fast"])
-                if speed_category == "slow":
-                    speed = random.uniform(5.0, 8.0)
-                    gap = random.uniform(self.min_follow_gap * 0.6, self.min_follow_gap * 0.8)
-                elif speed_category == "fast":
-                    speed = random.uniform(22.0, 30.0)
-                    gap = random.uniform(self.min_follow_gap * 1.2, self.min_follow_gap * 1.5)
-                else:
-                    speed = random.uniform(12.0, 16.0)
+                if self.uniform_speed_enabled:
+                    speed_category = "medium"
+                    speed = self.uniform_speed_value
                     gap = random.uniform(self.min_follow_gap * 0.9, self.min_follow_gap * 1.1)
+                else:
+                    speed_category = random.choice(["slow", "medium", "fast"])
+                    if speed_category == "slow":
+                        speed = random.uniform(5.0, 8.0)
+                        gap = random.uniform(self.min_follow_gap * 0.6, self.min_follow_gap * 0.8)
+                    elif speed_category == "fast":
+                        speed = random.uniform(22.0, 30.0)
+                        gap = random.uniform(self.min_follow_gap * 1.2, self.min_follow_gap * 1.5)
+                    else:
+                        speed = random.uniform(12.0, 16.0)
+                        gap = random.uniform(self.min_follow_gap * 0.9, self.min_follow_gap * 1.1)
                 gap = max(self.min_follow_gap, gap)
                 speed *= 1.0 + 0.75 * self.risk_factor
                 if queue:
+                    # Only spawn at the road entry if there is enough space.
                     direction = self._lane_direction(lane)
                     tail_pos = min(
                         (getattr(v, "position", position) for v in queue),
@@ -356,9 +364,11 @@ class World:
                     )
                     spawn_gap = self.min_follow_gap * 1.5
                     if direction > 0:
-                        position = tail_pos - spawn_gap
+                        if tail_pos - spawn_gap > position:
+                            continue
                     else:
-                        position = tail_pos + spawn_gap
+                        if tail_pos + spawn_gap < position:
+                            continue
                 car = Car(
                     speed=speed,
                     position=position,
@@ -369,6 +379,7 @@ class World:
                     min_gap=gap,
                     sprite_kind="normal",
                     sprite_category=speed_category,
+                    sprite_seed=random.randint(0, 1_000_000_000),
                 )
                 self.enqueue_vehicle(car, lane)
                 self._update_vehicle_center(car)
@@ -401,9 +412,11 @@ class World:
             )
             spawn_gap = self.min_follow_gap * 1.5
             if direction > 0:
-                position = tail_pos - spawn_gap
+                if tail_pos - spawn_gap > position:
+                    return
             else:
-                position = tail_pos + spawn_gap
+                if tail_pos + spawn_gap < position:
+                    return
         vehicle = EmergencyVehicle(
             speed=speed,
             position=position,
@@ -414,6 +427,7 @@ class World:
             min_gap=gap,
             sprite_kind="emergency",
             sprite_category="emergency",
+            sprite_seed=random.randint(0, 1_000_000_000),
         )
         self.enqueue_vehicle(vehicle, lane)
         self._update_vehicle_center(vehicle)

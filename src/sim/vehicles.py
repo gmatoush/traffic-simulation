@@ -28,6 +28,7 @@ class Vehicle:
     min_gap: float = 28.0
     sprite_kind: str = "normal"
     sprite_category: str = "medium"
+    sprite_seed: int = 0
     center_x: float = 0.0
     center_y: float = 0.0
     crashed: bool = False

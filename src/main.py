@@ -39,6 +39,7 @@ def main() -> None:
     ui_speed = sim_clock.speed
     risk_levels = ["LOW", "MED", "HIGH"]
     risk_index = 0
+    uniform_speed = False
 
     class LiveTrainingCallback(BaseCallback):
         def __init__(self) -> None:
@@ -126,6 +127,8 @@ def main() -> None:
                     sim_clock.speed = max(sim_clock.speed / 1.25, 0.1)
                 elif event.key == pygame.K_r:
                     risk_index = (risk_index + 1) % len(risk_levels)
+                elif event.key == pygame.K_u:
+                    uniform_speed = not uniform_speed
                 elif event.key == pygame.K_s and (event.mod & pygame.KMOD_CTRL):
                     model.save(live_model_path)
                 elif event.key == pygame.K_l and (event.mod & pygame.KMOD_CTRL):
@@ -137,6 +140,7 @@ def main() -> None:
                 if event.button == 1:
                     sx = _speed_slider_rect(renderer.width, renderer.height)
                     rx = _risk_toggle_rect(renderer.width, renderer.height)
+                    ux = _uniform_speed_rect(renderer.width, renderer.height)
                     play_btn = _play_button_rect(renderer.width, renderer.height)
                     stop_btn = _stop_button_rect(renderer.width, renderer.height)
                     save_btn = _save_button_rect(renderer.width, renderer.height)
@@ -145,6 +149,18 @@ def main() -> None:
                         dragging_speed = True
                     elif rx.collidepoint(event.pos):
                         risk_index = (risk_index + 1) % len(risk_levels)
+                        new_risk_value = [0.0, 0.5, 1.0][risk_index]
+                        live_env.envs[0].world = World(traffic_light=TrafficLight())
+                        env_world = live_env.envs[0].world
+                        env_world.risk_factor = new_risk_value
+                        env_world.uniform_speed_enabled = uniform_speed
+                        env_world.max_vehicles = 20 + 10 * risk_index
+                    elif ux.collidepoint(event.pos):
+                        uniform_speed = not uniform_speed
+                        live_env.envs[0].world = World(traffic_light=TrafficLight())
+                        env_world = live_env.envs[0].world
+                        env_world.risk_factor = risk_value
+                        env_world.uniform_speed_enabled = uniform_speed
                     elif play_btn.collidepoint(event.pos):
                         paused = False
                     elif stop_btn.collidepoint(event.pos):
@@ -179,6 +195,8 @@ def main() -> None:
 
         env_world = live_env.envs[0].world
         env_world.risk_factor = risk_value
+        env_world.uniform_speed_enabled = uniform_speed
+        env_world.max_vehicles = 20 + 10 * risk_index
         world = env_world
 
         window_active = pygame.display.get_active()
@@ -201,10 +219,11 @@ def main() -> None:
                 world,
                 sim_speed=sim_clock.speed,
                 show_overlays=show_overlays,
-                controls={
-                    "speed": ui_speed,
-                    "risk_label": risk_levels[risk_index],
-                },
+            controls={
+                "speed": ui_speed,
+                "risk_label": risk_levels[risk_index],
+                "uniform_speed": uniform_speed,
+            },
                 stats={
                     "avg_wait": avg_wait,
                     "elapsed": world.time,
@@ -236,18 +255,25 @@ def _risk_toggle_rect(width: int, height: int):
     return pygame.Rect(x + 10, y + 40, 220, 22)
 
 
+def _uniform_speed_rect(width: int, height: int):
+    import pygame
+    x = width - 280 - 12
+    y = 12
+    return pygame.Rect(x + 10, y + 132, 220, 22)
+
+
 def _save_button_rect(width: int, height: int):
     import pygame
     x = width - 280 - 12
     y = 12
-    return pygame.Rect(x + 10, y + 142, 120, 28)
+    return pygame.Rect(x + 10, y + 170, 120, 28)
 
 
 def _load_button_rect(width: int, height: int):
     import pygame
     x = width - 280 - 12
     y = 12
-    return pygame.Rect(x + 150, y + 142, 120, 28)
+    return pygame.Rect(x + 150, y + 170, 120, 28)
 
 
 def _play_button_rect(width: int, height: int):

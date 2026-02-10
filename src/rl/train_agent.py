@@ -46,7 +46,12 @@ def _is_name_key(key: str | None) -> bool:
     return key in ("n", "N")
 
 
-def train(algo: str = RL_ALGO, timesteps: int = RL_TRAIN_TIMESTEPS, model_path: str = RL_MODEL_PATH) -> None:
+def train(
+    algo: str = RL_ALGO,
+    timesteps: int = RL_TRAIN_TIMESTEPS,
+    model_path: str = RL_MODEL_PATH,
+    uniform_speed: bool = False,
+) -> None:
     # Keep headless training fully compatible with the rendered UI model.
     algo = "DQN"
     try:
@@ -61,7 +66,12 @@ def train(algo: str = RL_ALGO, timesteps: int = RL_TRAIN_TIMESTEPS, model_path: 
     # Headless training: no rendering and no artificial pacing.
     # Use finite episodes and loop forever across episodes.
     episode_length = 5000
-    env = DummyVecEnv([lambda: TrafficEnv(render_enabled=False, max_steps=episode_length)])
+    def _make_env():
+        env = TrafficEnv(render_enabled=False, max_steps=episode_length)
+        env.world.uniform_speed_enabled = uniform_speed
+        return env
+
+    env = DummyVecEnv([_make_env])
     models_dir = os.path.dirname(model_path) or os.getcwd()
     checkpoint_dir = os.path.join(models_dir, "checkpoint")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -165,4 +175,13 @@ def _compute_avg_reward(model, fallback: float) -> float:
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Headless training runner.")
+    parser.add_argument(
+        "--uniform-speed",
+        action="store_true",
+        help="Use uniform vehicle speed for easier training.",
+    )
+    args = parser.parse_args()
+    train(uniform_speed=args.uniform_speed)

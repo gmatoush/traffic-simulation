@@ -202,17 +202,19 @@ class PygameRenderer:
         return self.palette["vehicle"]
 
     def _get_vehicle_sprite(self, vehicle) -> pygame.Surface:
-        key = id(vehicle)
+        kind = getattr(vehicle, "sprite_kind", "normal")
+        category = getattr(vehicle, "sprite_category", "medium")
+        seed = getattr(vehicle, "sprite_seed", 0)
+        key = (kind, category, seed)
         if key not in self._vehicle_sprites:
-            kind = getattr(vehicle, "sprite_kind", "normal")
-            category = getattr(vehicle, "sprite_category", "medium")
             pool = self._sprite_pool.get("emergency" if kind == "emergency" else category, [])
             if not pool:
                 fallback = []
                 for sprites in self._sprite_pool.values():
                     fallback.extend(sprites)
                 pool = fallback
-            self._vehicle_sprites[key] = random.choice(pool)
+            chooser = random.Random(seed)
+            self._vehicle_sprites[key] = chooser.choice(pool)
         return self._vehicle_sprites[key]
 
     def _orient_and_scale_sprite(
@@ -292,7 +294,7 @@ class PygameRenderer:
     def _draw_controls(self, controls: dict) -> None:
         """Draw on-screen sliders/toggles for runtime control."""
         panel_w = 280
-        panel_h = 230
+        panel_h = 262
         x = self.width - panel_w - 12
         y = 12
         panel = pygame.Rect(x, y, panel_w, panel_h)
@@ -305,16 +307,18 @@ class PygameRenderer:
 
         label_color = self.palette["hud_text"]
         self.screen.blit(self.font.render(f"Speed: {speed:.2f}x", True, label_color), (x + 10, y + 8))
-        self.screen.blit(self.font.render("Spawn Rate", True, label_color), (x + 10, y + 44))
-        self.screen.blit(self.font.render(f"Spawn Rate: {risk_label}", True, label_color), (x + 120, y + 44))
+        self.screen.blit(self.font.render(f"Spawn Rate: {risk_label}", True, label_color), (x + 10, y + 44))
         # Phase display removed per request.
 
         self._draw_slider(x + 90, y + 18, 160, speed, 0.5, 2.0)
         # Risk is a toggle (LOW/MED/HIGH), so no slider is drawn.
         self._draw_icon_button(x + 10, y + 82, 120, 44, "play")
         self._draw_icon_button(x + 150, y + 82, 120, 44, "stop")
-        self._draw_button(x + 10, y + 142, 120, 28, "Save Model")
-        self._draw_button(x + 150, y + 142, 120, 28, "Load Model")
+        uniform = bool(controls.get("uniform_speed", False))
+        self.screen.blit(self.font.render("Uniform Speed", True, label_color), (x + 10, y + 136))
+        self._draw_checkbox(x + 150, y + 134, 18, uniform)
+        self._draw_button(x + 10, y + 170, 120, 28, "Save Model")
+        self._draw_button(x + 150, y + 170, 120, 28, "Load Model")
 
     def _draw_left_stats(self, stats: dict) -> None:
         """Draw key metrics on the upper-left."""
@@ -385,6 +389,14 @@ class PygameRenderer:
         text = self.font.render(label, True, self.palette["hud_text"])
         text_rect = text.get_rect(center=rect.center)
         self.screen.blit(text, text_rect)
+
+    def _draw_checkbox(self, x: int, y: int, size: int, checked: bool) -> None:
+        rect = pygame.Rect(x, y, size, size)
+        pygame.draw.rect(self.screen, (24, 28, 36), rect, border_radius=4)
+        pygame.draw.rect(self.screen, (70, 70, 80), rect, width=1, border_radius=4)
+        if checked:
+            inner = rect.inflate(-6, -6)
+            pygame.draw.rect(self.screen, (200, 220, 200), inner, border_radius=3)
 
     def _draw_icon_button(self, x: int, y: int, width: int, height: int, icon: str) -> None:
         rect = pygame.Rect(x, y, width, height)

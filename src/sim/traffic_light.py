@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from config.sim_config import GREEN_PHASE_DURATION, YELLOW_PHASE_DURATION
+
 
 class TrafficPhase(str, Enum):
     """Discrete traffic light phases for a single intersection."""
@@ -28,7 +30,8 @@ class TrafficLight:
 
     current_phase: TrafficPhase = TrafficPhase.NS_GREEN
     phase_timer: float = 0.0
-    min_phase_duration: float = 5.0
+    min_phase_duration: float = GREEN_PHASE_DURATION
+    yellow_phase_duration: float = YELLOW_PHASE_DURATION
     emergency_max_delay: float = 10.0
     _emergency_target: TrafficPhase | None = None
     _emergency_timer: float = 0.0
@@ -48,14 +51,14 @@ class TrafficLight:
             self._emergency_timer += dt
             if (
                 self.current_phase != self._emergency_target
-                and self.phase_timer >= self.min_phase_duration
+                and self.phase_timer >= self._current_phase_min_duration()
                 and self._emergency_timer >= self.emergency_max_delay
             ):
                 self.switch_phase(self._emergency_target)
                 self._clear_emergency_request()
                 return
 
-        if self.phase_timer >= self.min_phase_duration:
+        if self.phase_timer >= self._current_phase_min_duration():
             self.switch_phase(self._next_phase(self.current_phase))
 
     def switch_phase(self, next_phase: TrafficPhase) -> bool:
@@ -64,7 +67,7 @@ class TrafficLight:
         Returns:
             True if the phase changed, otherwise False.
         """
-        if self.phase_timer < self.min_phase_duration:
+        if self.phase_timer < self._current_phase_min_duration():
             return False
 
         if next_phase == self.current_phase:
@@ -110,3 +113,11 @@ class TrafficLight:
         )
         index = order.index(phase)
         return order[(index + 1) % len(order)]
+
+    def _current_phase_min_duration(self) -> float:
+        if self.current_phase in (TrafficPhase.NS_YELLOW, TrafficPhase.EW_YELLOW):
+            return self.yellow_phase_duration
+        return self.min_phase_duration
+
+    def can_switch(self) -> bool:
+        return self.phase_timer >= self._current_phase_min_duration()

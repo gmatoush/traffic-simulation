@@ -10,7 +10,13 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from config.sim_config import RL_ALGO, RL_MODEL_PATH, RL_TRAIN_TIMESTEPS
+from config.sim_config import (
+    RL_ACTION_REPEAT,
+    RL_ALGO,
+    RL_CURRICULUM_EPISODES,
+    RL_MODEL_PATH,
+    RL_TRAIN_TIMESTEPS,
+)
 from env.traffic_env import TrafficEnv
 
 
@@ -72,8 +78,15 @@ def train(
     # Use finite episodes and loop forever across episodes.
     episode_length = 2000 if fast else 5000
     n_envs = 12 if fast else 1
+
     def _make_env():
-        env = TrafficEnv(render_enabled=False, max_steps=episode_length)
+        env = TrafficEnv(
+            render_enabled=False,
+            max_steps=episode_length,
+            action_repeat=RL_ACTION_REPEAT,
+            use_curriculum=True,
+            curriculum_episodes=RL_CURRICULUM_EPISODES,
+        )
         env.world.uniform_speed_enabled = uniform_speed
         return env
 

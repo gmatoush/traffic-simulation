@@ -51,6 +51,7 @@ def train(
     timesteps: int = RL_TRAIN_TIMESTEPS,
     model_path: str = RL_MODEL_PATH,
     uniform_speed: bool = False,
+    fast: bool = False,
 ) -> None:
     # Keep headless training fully compatible with the rendered UI model.
     algo = "DQN"
@@ -60,41 +61,58 @@ def train(
         raise ImportError(
             "stable-baselines3 is required for training. Install it before running."
         ) from exc
+    try:
+        import torch
+    except Exception:
+        torch = None
 
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     # Headless training: no rendering and no artificial pacing.
     # Use finite episodes and loop forever across episodes.
-    episode_length = 5000
+    episode_length = 2000 if fast else 5000
+    n_envs = 12 if fast else 1
     def _make_env():
         env = TrafficEnv(render_enabled=False, max_steps=episode_length)
         env.world.uniform_speed_enabled = uniform_speed
         return env
 
-    env = DummyVecEnv([_make_env])
+    env = DummyVecEnv([_make_env for _ in range(n_envs)])
     models_dir = os.path.dirname(model_path) or os.getcwd()
     checkpoint_dir = os.path.join(models_dir, "checkpoint")
     os.makedirs(checkpoint_dir, exist_ok=True)
+
+    train_freq = 4 if fast else 1
+    gradient_steps = 4 if fast else 1
+    batch_size = 64 if fast else 32
+    buffer_size = 50000 if fast else 5000
+    learning_starts = 1000 if fast else 100
+
+    device = "cpu"
+    if torch is not None and getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+        device = "cuda"
 
     model = DQN(
         "MultiInputPolicy",
         env,
         verbose=0,
-        buffer_size=5000,
-        learning_starts=100,
-        batch_size=32,
-        train_freq=1,
-        gradient_steps=1,
+        buffer_size=buffer_size,
+        learning_starts=learning_starts,
+        batch_size=batch_size,
+        train_freq=train_freq,
+        gradient_steps=gradient_steps,
+        device=device,
     )
 
     print("Training headless. Press 'y' to stop and save. Press 's' for stats. Press 'n' to set filename.")
-    steps = 0
+    episodes = 0
     last_avg_reward = 0.0
     best_avg_reward = float("-inf")
     reward_buffer: list[float] = []
     checkpoint_best_path = os.path.join(checkpoint_dir, "best_model.zip")
     checkpoint_latest_path = os.path.join(checkpoint_dir, "latest_model.zip")
     checkpoint_interval_episodes = 5
+    live_stats = False
 
     class RewardTracker:
         def __init__(self, buf):
@@ -104,7 +122,10 @@ def train(
             rewards = locals_.get("rewards", None)
             if rewards is not None:
                 try:
-                    self.buf.append(float(rewards[0]))
+                    if hasattr(rewards, "__len__"):
+                        self.buf.append(float(sum(rewards) / len(rewards)))
+                    else:
+                        self.buf.append(float(rewards))
                     if len(self.buf) > 2000:
                         self.buf.pop(0)
                 except Exception:
@@ -115,12 +136,12 @@ def train(
     while True:
         # Train in full-episode chunks so loops align to episode boundaries.
         model.learn(
-            total_timesteps=episode_length,
+            total_timesteps=episode_length * n_envs,
             reset_num_timesteps=False,
             progress_bar=False,
             callback=reward_cb,
         )
-        steps += episode_length
+        episodes += 1
         avg_reward = _compute_avg_reward(model, last_avg_reward)
         if reward_buffer:
             avg_reward = sum(reward_buffer) / len(reward_buffer)
@@ -132,7 +153,7 @@ def train(
                 model.save(checkpoint_best_path)
             except Exception:
                 pass
-        if (steps // episode_length) % checkpoint_interval_episodes == 0:
+        if episodes % checkpoint_interval_episodes == 0:
             try:
                 model.save(checkpoint_latest_path)
             except Exception:
@@ -144,15 +165,27 @@ def train(
             if new_name:
                 model_path = os.path.join(models_dir, f"{new_name}.zip")
         if _is_stats_key(key):
-            print("\n" * 35)
-            print("Press 'y' to stop and save. Press 's' for stats. Press 'n' to set filename.")
-            print(f"Episodes: {steps // episode_length}")
-            print(f"Avg reward (rolling): {avg_reward:.2f}")
-            print(f"Model path: {model_path}")
-            print(f"Checkpoint best: {checkpoint_best_path}")
-            print(f"Checkpoint latest: {checkpoint_latest_path}")
+            live_stats = not live_stats
+            if live_stats:
+                print("\n" * 5)
+                print("Live stats ON (press 's' to stop updates). Press 'y' to stop and save. Press 'n' to set filename.")
+            else:
+                print("\n" * 2)
+                print("Live stats OFF. Press 's' to show updates again.")
         if _is_stop_key(key):
+            if live_stats:
+                sys.stdout.write("\n")
             break
+        if live_stats:
+            line = (
+                f"\rEpisodes: {episodes} | "
+                f"Avg reward (rolling): {avg_reward:.2f} | "
+                f"Best: {best_avg_reward:.2f} | "
+                f"Device: {device} | "
+                f"Model: {os.path.basename(model_path)}"
+            )
+            sys.stdout.write(line)
+            sys.stdout.flush()
     model.save(model_path)
 
 
@@ -183,5 +216,10 @@ if __name__ == "__main__":
         action="store_true",
         help="Use uniform vehicle speed for easier training.",
     )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Enable parallel headless training for maximum throughput.",
+    )
     args = parser.parse_args()
-    train(uniform_speed=args.uniform_speed)
+    train(uniform_speed=args.uniform_speed, fast=args.fast)

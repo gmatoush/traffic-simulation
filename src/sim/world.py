@@ -491,6 +491,8 @@ class World:
             and self.traffic_light is not None
             and hasattr(self.traffic_light, "update")
         ):
+            if self.crash_events > 0:
+                return
             self.traffic_light.update(dt)
 
     def _vehicle_world_bbox(self, vehicle: object) -> tuple[float, float, float, float]:

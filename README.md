@@ -5,7 +5,7 @@ Traffic Simulator is a lightweight, procedural four-way intersection simulator d
 - Four incoming lanes with queues, stop-line logic, and collision handling.
 - Emergency vehicles with higher speeds and emergency-aware traffic light behavior.
 - A Gym-compatible environment (`TrafficEnv`) with dense reward shaping and optional headless execution.
-- A Pygame UI for PPO model execution with speed control, spawn-rate toggle, and save/load model controls.
+- A Pygame UI for PPO model execution with speed control, spawn-rate toggle, model loading, model training, and side-by-side model comparison.
 
 ## Run The Demo
 1. Install dependencies:
@@ -19,6 +19,7 @@ UI Controls:
 - Spawn Rate toggle: LOW / MED / HIGH
 - Load Model: load a trained PPO `.zip`
 - Train Model button: prompts for episodes + steps per episode + model name, then trains in the background with a branded progress splash
+- Compare Models button: prompts for two PPO models, pauses normal simulation rendering, and shows live side-by-side stats for direct comparison
 - Keyboard:
   - `Space` toggles pause, `.` single-steps when paused
   - `Ctrl+L` opens PPO model loader

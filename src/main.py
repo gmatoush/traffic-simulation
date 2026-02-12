@@ -78,6 +78,8 @@ def main() -> None:
         env.close()
         return
     rl_controller, loaded_model_name = loaded_startup
+    compare_mode = False
+    compare_session: dict[str, object] | None = None
 
     def _reset_simulation() -> None:
         nonlocal obs
@@ -96,6 +98,114 @@ def main() -> None:
         last_world_time = env.world.time
         last_completed = int(getattr(env.world, "completed_vehicles", 0))
         last_total_crashes = int(getattr(env.world, "total_crashes", 0))
+
+    def _init_compare_agent_state(model_path: str) -> dict[str, object]:
+        agent_env = TrafficEnv(
+            render_enabled=False,
+            max_steps=10**9,
+            action_repeat=1,
+            reset_on_crash=False,
+            crash_pause_duration=0.0,
+        )
+        agent_obs, _ = agent_env.reset()
+        model_name = os.path.basename(model_path)
+        return {
+            "name": model_name,
+            "controller": RLController(algo="PPO", model_path=model_path),
+            "env": agent_env,
+            "obs": agent_obs,
+            "step_accum": 0.0,
+            "elapsed_offset": 0.0,
+            "completed_offset": 0,
+            "crash_offset": 0,
+            "last_world_time": agent_env.world.time,
+            "last_completed": int(getattr(agent_env.world, "completed_vehicles", 0)),
+            "last_total_crashes": int(getattr(agent_env.world, "total_crashes", 0)),
+            "episodes": 0,
+            "wall_elapsed": 0.0,
+            "avg_wait_sum": 0.0,
+            "avg_wait_samples": 0,
+        }
+
+    def _close_compare_session() -> None:
+        nonlocal compare_session
+        if compare_session is None:
+            return
+        for key in ("left", "right"):
+            side = compare_session.get(key)
+            if isinstance(side, dict):
+                side_env = side.get("env")
+                if side_env is not None and hasattr(side_env, "close"):
+                    side_env.close()
+        compare_session = None
+
+    def _step_compare_agent(agent: dict[str, object], real_seconds: float) -> dict[str, object]:
+        agent_env = agent["env"]
+        if not isinstance(agent_env, TrafficEnv):
+            raise TypeError("Invalid compare agent env")
+        controller = agent["controller"]
+        if not isinstance(controller, RLController):
+            raise TypeError("Invalid compare agent controller")
+
+        scaled_real_seconds = real_seconds * sim_clock.speed
+        agent["wall_elapsed"] = float(agent["wall_elapsed"]) + scaled_real_seconds
+        step_accum_local = float(agent["step_accum"])
+        step_accum_local += scaled_real_seconds
+        steps_this_frame = 0
+        while step_accum_local >= step_seconds and steps_this_frame < max_steps_per_frame:
+            obs_local = agent["obs"]
+            obs_local, _, terminated, truncated, _ = agent_env.step(controller.act(obs_local))
+            current_time = agent_env.world.time
+            current_completed = int(getattr(agent_env.world, "completed_vehicles", 0))
+            current_total_crashes = int(getattr(agent_env.world, "total_crashes", 0))
+
+            if current_time < float(agent["last_world_time"]):
+                agent["elapsed_offset"] = float(agent["elapsed_offset"]) + float(agent["last_world_time"])
+                agent["completed_offset"] = int(agent["completed_offset"]) + int(agent["last_completed"])
+                agent["crash_offset"] = int(agent["crash_offset"]) + int(agent["last_total_crashes"])
+
+            if terminated or truncated:
+                agent["elapsed_offset"] = float(agent["elapsed_offset"]) + current_time
+                agent["completed_offset"] = int(agent["completed_offset"]) + current_completed
+                agent["crash_offset"] = int(agent["crash_offset"]) + current_total_crashes
+                agent["episodes"] = int(agent["episodes"]) + 1
+                obs_local, _ = agent_env.reset()
+                current_time = agent_env.world.time
+                current_completed = int(getattr(agent_env.world, "completed_vehicles", 0))
+                current_total_crashes = int(getattr(agent_env.world, "total_crashes", 0))
+
+            agent["obs"] = obs_local
+            agent["last_world_time"] = current_time
+            agent["last_completed"] = current_completed
+            agent["last_total_crashes"] = current_total_crashes
+            step_accum_local -= step_seconds
+            steps_this_frame += 1
+
+        step_accum_local = min(step_accum_local, step_seconds * max_steps_per_frame)
+        agent["step_accum"] = step_accum_local
+
+        world_local = agent_env.world
+        stopped = [v for v in world_local.vehicles if getattr(v, "wait_time", 0.0) > 0.0]
+        instant_avg_wait = sum(v.wait_time for v in stopped) / len(stopped) if stopped else 0.0
+        agent["avg_wait_sum"] = float(agent["avg_wait_sum"]) + instant_avg_wait
+        agent["avg_wait_samples"] = int(agent["avg_wait_samples"]) + 1
+        avg_wait = float(agent["avg_wait_sum"]) / float(max(1, int(agent["avg_wait_samples"])))
+        elapsed_total = float(agent["wall_elapsed"])
+        completed = int(agent["completed_offset"]) + int(getattr(world_local, "completed_vehicles", 0))
+        total_crashes = int(agent["crash_offset"]) + int(getattr(world_local, "total_crashes", 0))
+        throughput_per_min = 0.0
+        crashes_per_min = 0.0
+        if elapsed_total > 0.0:
+            throughput_per_min = (completed * 60.0) / elapsed_total
+            crashes_per_min = (total_crashes * 60.0) / elapsed_total
+        return {
+            "name": str(agent["name"]),
+            "elapsed": elapsed_total,
+            "avg_wait": avg_wait,
+            "throughput": throughput_per_min,
+            "completed": completed,
+            "crashes_per_min": crashes_per_min,
+        }
 
     while running:
         real_dt = frame_clock.tick(60) / 1000.0
@@ -125,6 +235,9 @@ def main() -> None:
                     loaded = _prompt_load_ppo_model(models_dir, renderer)
                     if loaded[0] is not None:
                         rl_controller, loaded_model_name = loaded
+                elif event.key == pygame.K_c and compare_mode:
+                    compare_mode = False
+                    _close_compare_session()
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 sx = _speed_slider_rect(renderer.width, renderer.height)
                 rx = _risk_toggle_rect(renderer.width, renderer.height)
@@ -132,6 +245,7 @@ def main() -> None:
                 stop_btn = _stop_button_rect(renderer.width, renderer.height)
                 load_btn = _load_button_rect(renderer.width, renderer.height)
                 train_btn = _train_button_rect(renderer.width, renderer.height)
+                compare_btn = _compare_button_rect(renderer.width, renderer.height)
                 if sx.collidepoint(event.pos):
                     dragging_speed = True
                     ui_speed = _slider_value(event.pos[0], sx, 0.5, 2.0)
@@ -170,6 +284,36 @@ def main() -> None:
                             daemon=True,
                         )
                         thread.start()
+                elif compare_btn.collidepoint(event.pos):
+                    if compare_mode:
+                        compare_mode = False
+                        _close_compare_session()
+                        continue
+                    model_paths = _prompt_compare_ppo_models(models_dir, renderer)
+                    if model_paths is None:
+                        continue
+                    left_path, right_path = model_paths
+                    left_state = None
+                    right_state = None
+                    try:
+                        left_state = _init_compare_agent_state(left_path)
+                        right_state = _init_compare_agent_state(right_path)
+                    except Exception as exc:
+                        if isinstance(left_state, dict):
+                            left_env = left_state.get("env")
+                            if left_env is not None and hasattr(left_env, "close"):
+                                left_env.close()
+                        if isinstance(right_state, dict):
+                            right_env = right_state.get("env")
+                            if right_env is not None and hasattr(right_env, "close"):
+                                right_env.close()
+                        _show_dialog("Compare Models Failed", f"Could not start comparison:\n{exc}")
+                        continue
+                    compare_session = {
+                        "left": left_state,
+                        "right": right_state,
+                    }
+                    compare_mode = True
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 dragging_speed = False
             elif event.type == pygame.MOUSEMOTION and dragging_speed:
@@ -208,6 +352,22 @@ def main() -> None:
                 training_state["error"] = None
 
         sim_clock.speed = ui_speed
+        if compare_mode and compare_session is not None:
+            left_state = compare_session.get("left")
+            right_state = compare_session.get("right")
+            if not isinstance(left_state, dict) or not isinstance(right_state, dict):
+                compare_mode = False
+                _close_compare_session()
+                continue
+            left_stats = _step_compare_agent(left_state, real_dt)
+            right_stats = _step_compare_agent(right_state, real_dt)
+            renderer.render_model_comparison(
+                left_stats,
+                right_stats,
+                title="PPO Model Comparison",
+            )
+            continue
+
         risk_value = [0.0, 0.5, 1.0][risk_index]
         env.world.risk_factor = risk_value
         env.world.uniform_speed_enabled = True
@@ -271,13 +431,19 @@ def main() -> None:
         )
 
     pygame.quit()
+    _close_compare_session()
     env.close()
 
 
 def _prompt_load_ppo_model(models_dir: str, renderer) -> tuple[RLController | None, str]:
     while True:
         _draw_branding_splash(renderer)
-        path = _choose_model_path(models_dir, save=False)
+        path = _choose_model_path(
+            models_dir,
+            save=False,
+            renderer=renderer,
+            hint="Select a PPO model to load.",
+        )
         if not path:
             return None, "None"
         try:
@@ -381,6 +547,14 @@ def _train_button_rect(width: int, height: int):
     return pygame.Rect(x + 10, y + 170, 260, 28)
 
 
+def _compare_button_rect(width: int, height: int):
+    import pygame
+
+    x = width - 280 - 12
+    y = 12
+    return pygame.Rect(x + 10, y + 204, 260, 28)
+
+
 def _load_default_or_prompt_model(
     models_dir: str, default_model_path: str, renderer
 ) -> tuple[RLController, str] | None:
@@ -401,6 +575,26 @@ def _load_default_or_prompt_model(
     return None
 
 
+def _prompt_compare_ppo_models(models_dir: str, renderer) -> tuple[str, str] | None:
+    first = _choose_model_path(
+        models_dir,
+        save=False,
+        renderer=renderer,
+        hint="Choose first PPO model for comparison.",
+    )
+    if not first:
+        return None
+    second = _choose_model_path(
+        models_dir,
+        save=False,
+        renderer=renderer,
+        hint="Choose second PPO model for comparison.",
+    )
+    if not second:
+        return None
+    return first, second
+
+
 def _play_button_rect(width: int, height: int):
     import pygame
 
@@ -417,8 +611,18 @@ def _stop_button_rect(width: int, height: int):
     return pygame.Rect(x + 150, y + 82, 120, 44)
 
 
-def _choose_model_path(models_dir: str, save: bool) -> str | None:
+def _choose_model_path(
+    models_dir: str,
+    save: bool,
+    renderer=None,
+    hint: str | None = None,
+) -> str | None:
     """Open a file dialog rooted in the models directory."""
+    if renderer is not None:
+        _draw_branding_splash(
+            renderer,
+            hint=hint or ("Choose a model save path." if save else "Choose a PPO model."),
+        )
     try:
         import tkinter as tk
         from tkinter import filedialog

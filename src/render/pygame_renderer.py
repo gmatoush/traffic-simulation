@@ -327,7 +327,7 @@ class PygameRenderer:
         """Draw on-screen sliders/toggles for runtime control."""
         panel_w = 280
         show_mode_algo = "mode" in controls or "algo" in controls
-        panel_h = 312 if show_mode_algo else 242
+        panel_h = 346 if show_mode_algo else 276
         x = self.width - panel_w - 12
         y = 12
         panel = pygame.Rect(x, y, panel_w, panel_h)
@@ -352,11 +352,12 @@ class PygameRenderer:
         self._draw_icon_button(x + 150, y + 82, 120, 44, "stop")
         self._draw_button(x + 10, y + 136, 260, 28, "Load Model")
         self._draw_button(x + 10, y + 170, 260, 28, "Train Model")
+        self._draw_button(x + 10, y + 204, 260, 28, "Compare Models")
         if show_mode_algo:
-            self.screen.blit(self.font.render("Mode", True, label_color), (x + 10, y + 214))
-            self._draw_button(x + 90, y + 208, 180, 28, mode_label)
-            self.screen.blit(self.font.render("Algo", True, label_color), (x + 10, y + 250))
-            self._draw_button(x + 90, y + 244, 180, 28, algo_label)
+            self.screen.blit(self.font.render("Mode", True, label_color), (x + 10, y + 248))
+            self._draw_button(x + 90, y + 242, 180, 28, mode_label)
+            self.screen.blit(self.font.render("Algo", True, label_color), (x + 10, y + 284))
+            self._draw_button(x + 90, y + 278, 180, 28, algo_label)
 
     def _draw_left_stats(self, stats: dict) -> None:
         """Draw key metrics on the upper-left."""
@@ -483,6 +484,119 @@ class PygameRenderer:
         target = pygame.transform.smoothscale(sprite, (height, height))
         icon_rect = target.get_rect(center=rect.center)
         self.screen.blit(target, icon_rect)
+
+    def render_model_comparison(
+        self, left_stats: dict, right_stats: dict, title: str = "Model Comparison"
+    ) -> None:
+        """Render side-by-side model stats without vehicle scene updates."""
+        self._draw_static_scene()
+        better = self._comparison_metric_colors(left_stats, right_stats)
+        self._draw_compare_panel(
+            self.width * 0.25,
+            self.height * 0.52,
+            max(340, int(self.width * 0.42)),
+            left_stats,
+            better.get("left", {}),
+        )
+        self._draw_compare_panel(
+            self.width * 0.75,
+            self.height * 0.52,
+            max(340, int(self.width * 0.42)),
+            right_stats,
+            better.get("right", {}),
+        )
+        title_surf = self.font.render(title, True, self.palette["hud_text"])
+        title_rect = title_surf.get_rect(center=(self.width // 2, 36))
+        self.screen.blit(title_surf, title_rect)
+        hint = self.font.render("Press C to exit comparison mode", True, self.palette["hud_text"])
+        hint_rect = hint.get_rect(center=(self.width // 2, self.height - 24))
+        self.screen.blit(hint, hint_rect)
+        pygame.display.flip()
+
+    def _comparison_metric_colors(self, left_stats: dict, right_stats: dict) -> dict[str, dict[str, tuple[int, int, int]]]:
+        green = (80, 230, 120)
+        red = (235, 80, 80)
+        neutral = self.palette["hud_text"]
+
+        left_colors: dict[str, tuple[int, int, int]] = {}
+        right_colors: dict[str, tuple[int, int, int]] = {}
+
+        def mark(metric: str, higher_is_better: bool) -> None:
+            left_val = float(left_stats.get(metric, 0.0))
+            right_val = float(right_stats.get(metric, 0.0))
+            if abs(left_val - right_val) < 1e-9:
+                left_colors[metric] = neutral
+                right_colors[metric] = neutral
+                return
+            if higher_is_better:
+                left_colors[metric] = green if left_val > right_val else red
+                right_colors[metric] = green if right_val > left_val else red
+            else:
+                left_colors[metric] = green if left_val < right_val else red
+                right_colors[metric] = green if right_val < left_val else red
+
+        mark("avg_wait", higher_is_better=False)
+        mark("throughput", higher_is_better=True)
+        mark("crashes_per_min", higher_is_better=False)
+        mark("completed", higher_is_better=True)
+
+        # Elapsed is a stability/coverage signal in compare mode.
+        mark("elapsed", higher_is_better=True)
+
+        left_wins = 0
+        right_wins = 0
+        for metric in ("avg_wait", "throughput", "crashes_per_min", "completed", "elapsed"):
+            lc = left_colors.get(metric, neutral)
+            rc = right_colors.get(metric, neutral)
+            if lc == green and rc == red:
+                left_wins += 1
+            elif rc == green and lc == red:
+                right_wins += 1
+
+        if left_wins > right_wins:
+            left_colors["name"] = green
+            right_colors["name"] = red
+        elif right_wins > left_wins:
+            left_colors["name"] = red
+            right_colors["name"] = green
+        else:
+            left_colors["name"] = neutral
+            right_colors["name"] = neutral
+        return {"left": left_colors, "right": right_colors}
+
+    def _draw_compare_panel(
+        self,
+        center_x: float,
+        center_y: float,
+        width: int,
+        stats: dict,
+        metric_colors: dict[str, tuple[int, int, int]],
+    ) -> None:
+        panel_w = int(width)
+        lines = [
+            ("name", f"Model: {stats.get('name', 'Unknown')}"),
+            ("elapsed", f"Elapsed: {float(stats.get('elapsed', 0.0)):.1f}s"),
+            ("avg_wait", f"Avg stopped wait: {float(stats.get('avg_wait', 0.0)):.2f}s"),
+            ("throughput", f"Vehicles per minute (vehicles/min): {float(stats.get('throughput', 0.0)):.1f}"),
+            ("crashes_per_min", f"Crashes per minute (crashes/min): {float(stats.get('crashes_per_min', 0.0)):.2f}"),
+            ("completed", f"Vehicles cleared: {int(stats.get('completed', 0))}"),
+        ]
+        line_h = 26
+        panel_h = 18 + line_h * len(lines)
+        x = int(center_x - panel_w / 2)
+        y = int(center_y - panel_h / 2)
+        rect = pygame.Rect(x, y, panel_w, panel_h)
+        pygame.draw.rect(self.screen, (15, 18, 24), rect, border_radius=8)
+        pygame.draw.rect(self.screen, (60, 60, 70), rect, width=1, border_radius=8)
+        ty = y + 10
+        for idx, (metric, line) in enumerate(lines):
+            if idx == 0:
+                color = (255, 255, 255)
+            else:
+                color = metric_colors.get(metric, self.palette["hud_text"])
+            surf = self.font.render(line, True, color)
+            self.screen.blit(surf, (x + 12, ty))
+            ty += line_h
 
 
     def _draw_background(self, surface: pygame.Surface) -> None:

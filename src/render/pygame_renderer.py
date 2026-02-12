@@ -327,7 +327,7 @@ class PygameRenderer:
         """Draw on-screen sliders/toggles for runtime control."""
         panel_w = 280
         show_mode_algo = "mode" in controls or "algo" in controls
-        panel_h = 346 if show_mode_algo else 276
+        panel_h = 376 if show_mode_algo else 306
         x = self.width - panel_w - 12
         y = 12
         panel = pygame.Rect(x, y, panel_w, panel_h)
@@ -353,11 +353,15 @@ class PygameRenderer:
         self._draw_button(x + 10, y + 136, 260, 28, "Load Model")
         self._draw_button(x + 10, y + 170, 260, 28, "Train Model")
         self._draw_button(x + 10, y + 204, 260, 28, "Compare Models")
+        self.screen.blit(
+            self.font.render("Press C to return to start page", True, label_color),
+            (x + 10, y + 240),
+        )
         if show_mode_algo:
-            self.screen.blit(self.font.render("Mode", True, label_color), (x + 10, y + 248))
-            self._draw_button(x + 90, y + 242, 180, 28, mode_label)
-            self.screen.blit(self.font.render("Algo", True, label_color), (x + 10, y + 284))
-            self._draw_button(x + 90, y + 278, 180, 28, algo_label)
+            self.screen.blit(self.font.render("Mode", True, label_color), (x + 10, y + 278))
+            self._draw_button(x + 90, y + 272, 180, 28, mode_label)
+            self.screen.blit(self.font.render("Algo", True, label_color), (x + 10, y + 314))
+            self._draw_button(x + 90, y + 308, 180, 28, algo_label)
 
     def _draw_left_stats(self, stats: dict) -> None:
         """Draw key metrics on the upper-left."""
@@ -486,29 +490,44 @@ class PygameRenderer:
         self.screen.blit(target, icon_rect)
 
     def render_model_comparison(
-        self, left_stats: dict, right_stats: dict, title: str = "Model Comparison"
+        self,
+        left_stats: dict,
+        right_stats: dict,
+        title: str = "Model Comparison",
+        elapsed: float = 0.0,
+        compare_speed: float = 1.0,
     ) -> None:
         """Render side-by-side model stats without vehicle scene updates."""
-        self._draw_static_scene()
+        self.screen.fill((0, 0, 0))
         better = self._comparison_metric_colors(left_stats, right_stats)
+        panel_center_y = self.height * 0.52
+        panel_w = max(340, int(self.width * 0.42))
         self._draw_compare_panel(
             self.width * 0.25,
-            self.height * 0.52,
-            max(340, int(self.width * 0.42)),
+            panel_center_y,
+            panel_w,
             left_stats,
             better.get("left", {}),
         )
         self._draw_compare_panel(
             self.width * 0.75,
-            self.height * 0.52,
-            max(340, int(self.width * 0.42)),
+            panel_center_y,
+            panel_w,
             right_stats,
             better.get("right", {}),
         )
         title_surf = self.font.render(title, True, self.palette["hud_text"])
         title_rect = title_surf.get_rect(center=(self.width // 2, 36))
         self.screen.blit(title_surf, title_rect)
-        hint = self.font.render("Press C to exit comparison mode", True, self.palette["hud_text"])
+        speed_label = self.font.render(f"Compare Speed: {compare_speed:.2f}x", True, self.palette["hud_text"])
+        self.screen.blit(speed_label, (24, 20))
+        self._draw_slider(210, 22, 220, compare_speed, 0.5, 10.0)
+        elapsed_font = pygame.font.Font(None, 48)
+        elapsed_surf = elapsed_font.render(f"Elapsed: {elapsed:.1f}s", True, self.palette["hud_text"])
+        elapsed_rect = elapsed_surf.get_rect(center=(self.width // 2, int(panel_center_y - 108)))
+        self.screen.blit(elapsed_surf, elapsed_rect)
+        self._draw_compare_legend_box(int(panel_center_y + 104))
+        hint = self.font.render("Press C to return to start page", True, self.palette["hud_text"])
         hint_rect = hint.get_rect(center=(self.width // 2, self.height - 24))
         self.screen.blit(hint, hint_rect)
         pygame.display.flip()
@@ -516,7 +535,7 @@ class PygameRenderer:
     def _comparison_metric_colors(self, left_stats: dict, right_stats: dict) -> dict[str, dict[str, tuple[int, int, int]]]:
         green = (80, 230, 120)
         red = (235, 80, 80)
-        neutral = self.palette["hud_text"]
+        yellow = (240, 200, 90)
 
         left_colors: dict[str, tuple[int, int, int]] = {}
         right_colors: dict[str, tuple[int, int, int]] = {}
@@ -525,8 +544,8 @@ class PygameRenderer:
             left_val = float(left_stats.get(metric, 0.0))
             right_val = float(right_stats.get(metric, 0.0))
             if abs(left_val - right_val) < 1e-9:
-                left_colors[metric] = neutral
-                right_colors[metric] = neutral
+                left_colors[metric] = yellow
+                right_colors[metric] = yellow
                 return
             if higher_is_better:
                 left_colors[metric] = green if left_val > right_val else red
@@ -540,28 +559,8 @@ class PygameRenderer:
         mark("crashes_per_min", higher_is_better=False)
         mark("completed", higher_is_better=True)
 
-        # Elapsed is a stability/coverage signal in compare mode.
-        mark("elapsed", higher_is_better=True)
-
-        left_wins = 0
-        right_wins = 0
-        for metric in ("avg_wait", "throughput", "crashes_per_min", "completed", "elapsed"):
-            lc = left_colors.get(metric, neutral)
-            rc = right_colors.get(metric, neutral)
-            if lc == green and rc == red:
-                left_wins += 1
-            elif rc == green and lc == red:
-                right_wins += 1
-
-        if left_wins > right_wins:
-            left_colors["name"] = green
-            right_colors["name"] = red
-        elif right_wins > left_wins:
-            left_colors["name"] = red
-            right_colors["name"] = green
-        else:
-            left_colors["name"] = neutral
-            right_colors["name"] = neutral
+        left_colors["name"] = (255, 255, 255)
+        right_colors["name"] = (255, 255, 255)
         return {"left": left_colors, "right": right_colors}
 
     def _draw_compare_panel(
@@ -575,7 +574,6 @@ class PygameRenderer:
         panel_w = int(width)
         lines = [
             ("name", f"Model: {stats.get('name', 'Unknown')}"),
-            ("elapsed", f"Elapsed: {float(stats.get('elapsed', 0.0)):.1f}s"),
             ("avg_wait", f"Avg stopped wait: {float(stats.get('avg_wait', 0.0)):.2f}s"),
             ("throughput", f"Vehicles per minute (vehicles/min): {float(stats.get('throughput', 0.0)):.1f}"),
             ("crashes_per_min", f"Crashes per minute (crashes/min): {float(stats.get('crashes_per_min', 0.0)):.2f}"),
@@ -590,13 +588,45 @@ class PygameRenderer:
         pygame.draw.rect(self.screen, (60, 60, 70), rect, width=1, border_radius=8)
         ty = y + 10
         for idx, (metric, line) in enumerate(lines):
-            if idx == 0:
-                color = (255, 255, 255)
-            else:
-                color = metric_colors.get(metric, self.palette["hud_text"])
+            color = metric_colors.get(metric, self.palette["hud_text"])
             surf = self.font.render(line, True, color)
             self.screen.blit(surf, (x + 12, ty))
             ty += line_h
+
+    def _draw_compare_legend_box(self, center_y: int) -> None:
+        legend_w = min(760, self.width - 64)
+        legend_h = 170
+        x = (self.width - legend_w) // 2
+        y = center_y
+        rect = pygame.Rect(x, y, legend_w, legend_h)
+        pygame.draw.rect(self.screen, (15, 18, 24), rect, border_radius=8)
+        pygame.draw.rect(self.screen, (60, 60, 70), rect, width=1, border_radius=8)
+
+        title = self.font.render("Legend", True, self.palette["hud_text"])
+        title_rect = title.get_rect(center=(x + legend_w // 2, y + 20))
+        self.screen.blit(title, title_rect)
+
+        green_line = self.font.render(
+            "Green = Better performance",
+            True,
+            (80, 230, 120),
+        )
+        red_line = self.font.render(
+            "Red = Worse performance",
+            True,
+            (235, 80, 80),
+        )
+        yellow_line = self.font.render(
+            "Yellow = Same performance",
+            True,
+            (240, 200, 90),
+        )
+        green_rect = green_line.get_rect(center=(x + legend_w // 2, y + 52))
+        red_rect = red_line.get_rect(center=(x + legend_w // 2, y + 94))
+        yellow_rect = yellow_line.get_rect(center=(x + legend_w // 2, y + 136))
+        self.screen.blit(green_line, green_rect)
+        self.screen.blit(red_line, red_rect)
+        self.screen.blit(yellow_line, yellow_rect)
 
 
     def _draw_background(self, surface: pygame.Surface) -> None:

@@ -67,19 +67,13 @@ def main() -> None:
     }
     state_lock = threading.Lock()
 
-    loaded_startup = _load_default_or_prompt_model(
-        models_dir=models_dir,
-        default_model_path=default_model_path,
-        renderer=renderer,
-    )
-    if loaded_startup is None:
-        _show_dialog("Model Required", "No PPO model selected. Exiting.")
-        pygame.quit()
-        env.close()
-        return
-    rl_controller, loaded_model_name = loaded_startup
+    rl_controller: RLController | None = None
+    loaded_model_name = "None"
     compare_mode = False
     compare_session: dict[str, object] | None = None
+    compare_speed = 1.0
+    dragging_compare_speed = False
+    show_training_overlay = False
 
     def _reset_simulation() -> None:
         nonlocal obs
@@ -122,7 +116,6 @@ def main() -> None:
             "last_completed": int(getattr(agent_env.world, "completed_vehicles", 0)),
             "last_total_crashes": int(getattr(agent_env.world, "total_crashes", 0)),
             "episodes": 0,
-            "wall_elapsed": 0.0,
             "avg_wait_sum": 0.0,
             "avg_wait_samples": 0,
         }
@@ -139,7 +132,9 @@ def main() -> None:
                     side_env.close()
         compare_session = None
 
-    def _step_compare_agent(agent: dict[str, object], real_seconds: float) -> dict[str, object]:
+    def _step_compare_agent(
+        agent: dict[str, object], real_seconds: float, elapsed_total: float, speed_factor: float
+    ) -> dict[str, object]:
         agent_env = agent["env"]
         if not isinstance(agent_env, TrafficEnv):
             raise TypeError("Invalid compare agent env")
@@ -147,8 +142,7 @@ def main() -> None:
         if not isinstance(controller, RLController):
             raise TypeError("Invalid compare agent controller")
 
-        scaled_real_seconds = real_seconds * sim_clock.speed
-        agent["wall_elapsed"] = float(agent["wall_elapsed"]) + scaled_real_seconds
+        scaled_real_seconds = real_seconds * speed_factor
         step_accum_local = float(agent["step_accum"])
         step_accum_local += scaled_real_seconds
         steps_this_frame = 0
@@ -190,7 +184,6 @@ def main() -> None:
         agent["avg_wait_sum"] = float(agent["avg_wait_sum"]) + instant_avg_wait
         agent["avg_wait_samples"] = int(agent["avg_wait_samples"]) + 1
         avg_wait = float(agent["avg_wait_sum"]) / float(max(1, int(agent["avg_wait_samples"])))
-        elapsed_total = float(agent["wall_elapsed"])
         completed = int(agent["completed_offset"]) + int(getattr(world_local, "completed_vehicles", 0))
         total_crashes = int(agent["crash_offset"]) + int(getattr(world_local, "total_crashes", 0))
         throughput_per_min = 0.0
@@ -207,6 +200,131 @@ def main() -> None:
             "crashes_per_min": crashes_per_min,
         }
 
+    def _enter_start_page() -> None:
+        nonlocal running
+        nonlocal rl_controller
+        nonlocal loaded_model_name
+        nonlocal compare_mode
+        nonlocal compare_session
+        nonlocal compare_speed
+        nonlocal show_training_overlay
+
+        rl_controller = None
+        loaded_model_name = "None"
+        compare_mode = False
+        compare_speed = 1.0
+        show_training_overlay = False
+        _close_compare_session()
+
+        while running and rl_controller is None and not compare_mode:
+            start_choice = _prompt_start_mode(renderer)
+            if start_choice is None:
+                running = False
+                return
+            if start_choice == "run":
+                loaded_startup = _load_default_or_prompt_model(
+                    models_dir=models_dir,
+                    default_model_path=default_model_path,
+                    renderer=renderer,
+                )
+                if loaded_startup is not None:
+                    rl_controller, loaded_model_name = loaded_startup
+                continue
+            if start_choice == "compare":
+                model_paths = _prompt_compare_ppo_models(models_dir, renderer)
+                if model_paths is None:
+                    continue
+                left_path, right_path = model_paths
+                left_state = None
+                right_state = None
+                try:
+                    left_state = _init_compare_agent_state(left_path)
+                    right_state = _init_compare_agent_state(right_path)
+                except Exception as exc:
+                    if isinstance(left_state, dict):
+                        left_env = left_state.get("env")
+                        if left_env is not None and hasattr(left_env, "close"):
+                            left_env.close()
+                    if isinstance(right_state, dict):
+                        right_env = right_state.get("env")
+                        if right_env is not None and hasattr(right_env, "close"):
+                            right_env.close()
+                    _show_dialog("Compare Models Failed", f"Could not start comparison:\n{exc}")
+                    continue
+                compare_session = {"left": left_state, "right": right_state, "elapsed": 0.0}
+                rl_controller = left_state["controller"]
+                loaded_model_name = str(left_state["name"])
+                compare_mode = True
+                return
+            if start_choice == "train":
+                params = _prompt_training_params()
+                if params is None:
+                    continue
+                episodes, episode_steps, model_name = params
+                model_path = os.path.join(models_dir, f"{model_name}.zip")
+                with state_lock:
+                    training_state.update(
+                        {
+                            "active": True,
+                            "progress": 0.0,
+                            "message": f"Training {model_name}.zip (0/{episodes} episodes)",
+                            "result_path": None,
+                            "error": None,
+                        }
+                    )
+                show_training_overlay = True
+                thread = threading.Thread(
+                    target=_train_model_background,
+                    args=(episodes, episode_steps, model_path, training_state, state_lock),
+                    daemon=True,
+                )
+                thread.start()
+                leave_training_view = False
+                while running:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            running = False
+                        elif event.type == pygame.VIDEORESIZE:
+                            renderer.resize(event.w, event.h)
+                        elif event.type == pygame.KEYDOWN and event.key == pygame.K_c:
+                            show_training_overlay = False
+                            leave_training_view = True
+                            break
+                    if leave_training_view:
+                        break
+                    with state_lock:
+                        training_active = bool(training_state["active"])
+                        train_progress = float(training_state["progress"])
+                        train_message = str(training_state["message"])
+                        train_result = training_state["result_path"]
+                        train_error = training_state["error"]
+                    if training_active:
+                        _draw_branding_splash(
+                            renderer,
+                            hint=f"{train_message}  |  Press C to return to start page",
+                            progress=train_progress,
+                            show_spinner=True,
+                        )
+                        frame_clock.tick(60)
+                        continue
+                    if train_result is not None:
+                        _show_dialog("Training Complete", f"Model saved:\n{train_result}")
+                        with state_lock:
+                            training_state["result_path"] = None
+                    if train_error is not None:
+                        _show_dialog("Training Failed", str(train_error))
+                        with state_lock:
+                            training_state["error"] = None
+                    break
+
+    _enter_start_page()
+
+    if not running:
+        pygame.quit()
+        _close_compare_session()
+        env.close()
+        return
+
     while running:
         real_dt = frame_clock.tick(60) / 1000.0
 
@@ -216,29 +334,43 @@ def main() -> None:
             elif event.type == pygame.VIDEORESIZE:
                 renderer.resize(event.w, event.h)
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
+                if event.key == pygame.K_SPACE and not compare_mode:
                     paused = not paused
-                elif event.key == pygame.K_PERIOD and paused:
+                elif event.key == pygame.K_PERIOD and paused and rl_controller is not None and not compare_mode:
                     obs, _, terminated, truncated, _ = env.step(rl_controller.act(obs))
                     if terminated or truncated:
                         obs, _ = env.reset()
                 elif event.key in (pygame.K_TAB, pygame.K_d):
                     show_overlays = not show_overlays
                 elif event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
-                    ui_speed = min(ui_speed * 1.25, 2.0)
+                    if compare_mode:
+                        compare_speed = min(compare_speed * 1.25, 10.0)
+                    else:
+                        ui_speed = min(ui_speed * 1.25, 2.0)
                 elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
-                    ui_speed = max(ui_speed / 1.25, 0.5)
-                elif event.key == pygame.K_r:
+                    if compare_mode:
+                        compare_speed = max(compare_speed / 1.25, 0.5)
+                    else:
+                        ui_speed = max(ui_speed / 1.25, 0.5)
+                elif event.key == pygame.K_r and not compare_mode:
                     risk_index = (risk_index + 1) % len(risk_levels)
                     _reset_simulation()
-                elif event.key == pygame.K_l and (event.mod & pygame.KMOD_CTRL):
+                elif event.key == pygame.K_l and (event.mod & pygame.KMOD_CTRL) and not compare_mode:
                     loaded = _prompt_load_ppo_model(models_dir, renderer)
                     if loaded[0] is not None:
                         rl_controller, loaded_model_name = loaded
-                elif event.key == pygame.K_c and compare_mode:
-                    compare_mode = False
-                    _close_compare_session()
+                elif event.key == pygame.K_c:
+                    show_training_overlay = False
+                    _enter_start_page()
+                    if not running:
+                        break
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if compare_mode:
+                    compare_slider = _compare_speed_slider_rect(renderer.width, renderer.height)
+                    if compare_slider.collidepoint(event.pos):
+                        dragging_compare_speed = True
+                        compare_speed = _slider_value(event.pos[0], compare_slider, 0.5, 10.0)
+                    continue
                 sx = _speed_slider_rect(renderer.width, renderer.height)
                 rx = _risk_toggle_rect(renderer.width, renderer.height)
                 play_btn = _play_button_rect(renderer.width, renderer.height)
@@ -278,6 +410,7 @@ def main() -> None:
                                     "error": None,
                                 }
                             )
+                        show_training_overlay = True
                         thread = threading.Thread(
                             target=_train_model_background,
                             args=(episodes, episode_steps, model_path, training_state, state_lock),
@@ -312,13 +445,22 @@ def main() -> None:
                     compare_session = {
                         "left": left_state,
                         "right": right_state,
+                        "elapsed": 0.0,
                     }
+                    if rl_controller is None:
+                        rl_controller = left_state["controller"]
+                        loaded_model_name = str(left_state["name"])
                     compare_mode = True
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 dragging_speed = False
+                dragging_compare_speed = False
             elif event.type == pygame.MOUSEMOTION and dragging_speed:
                 ui_speed = _slider_value(
                     event.pos[0], _speed_slider_rect(renderer.width, renderer.height), 0.5, 2.0
+                )
+            elif event.type == pygame.MOUSEMOTION and dragging_compare_speed:
+                compare_speed = _slider_value(
+                    event.pos[0], _compare_speed_slider_rect(renderer.width, renderer.height), 0.5, 10.0
                 )
 
         with state_lock:
@@ -328,10 +470,10 @@ def main() -> None:
             train_result = training_state["result_path"]
             train_error = training_state["error"]
 
-        if training_active:
+        if training_active and show_training_overlay:
             _draw_branding_splash(
                 renderer,
-                hint=train_message,
+                hint=f"{train_message}  |  Press C to return to start page",
                 progress=train_progress,
                 show_spinner=True,
             )
@@ -346,10 +488,12 @@ def main() -> None:
                 _show_dialog("Training Complete", f"Model trained but failed to load:\n{exc}")
             with state_lock:
                 training_state["result_path"] = None
+            show_training_overlay = False
         if train_error is not None:
             _show_dialog("Training Failed", str(train_error))
             with state_lock:
                 training_state["error"] = None
+            show_training_overlay = False
 
         sim_clock.speed = ui_speed
         if compare_mode and compare_session is not None:
@@ -359,13 +503,21 @@ def main() -> None:
                 compare_mode = False
                 _close_compare_session()
                 continue
-            left_stats = _step_compare_agent(left_state, real_dt)
-            right_stats = _step_compare_agent(right_state, real_dt)
+            compare_elapsed = float(compare_session.get("elapsed", 0.0)) + (real_dt * compare_speed)
+            compare_session["elapsed"] = compare_elapsed
+            left_stats = _step_compare_agent(left_state, real_dt, compare_elapsed, compare_speed)
+            right_stats = _step_compare_agent(right_state, real_dt, compare_elapsed, compare_speed)
             renderer.render_model_comparison(
                 left_stats,
                 right_stats,
-                title="PPO Model Comparison",
+                title="Model Comparison",
+                elapsed=compare_elapsed,
+                compare_speed=compare_speed,
             )
+            continue
+
+        if rl_controller is None:
+            _draw_branding_splash(renderer, hint="Load a PPO model to run simulation.")
             continue
 
         risk_value = [0.0, 0.5, 1.0][risk_index]
@@ -419,7 +571,7 @@ def main() -> None:
             controls={
                 "speed": ui_speed,
                 "risk_label": risk_levels[risk_index],
-                "phase": f"PPO | {loaded_model_name}",
+                "phase": f"Model: {loaded_model_name}",
             },
             stats={
                 "avg_wait": avg_wait,
@@ -459,6 +611,7 @@ def _draw_branding_splash(
     hint: str = "Select a PPO model to start rendering.",
     progress: float | None = None,
     show_spinner: bool = False,
+    present: bool = True,
 ) -> None:
     import pygame
 
@@ -506,7 +659,8 @@ def _draw_branding_splash(
             rot = pygame.transform.rotate(spinner, i * 30)
             rect = rot.get_rect(center=(cx, cy))
             renderer.screen.blit(rot, rect)
-    pygame.display.flip()
+    if present:
+        pygame.display.flip()
 
 
 def _speed_slider_rect(width: int, height: int):
@@ -515,6 +669,12 @@ def _speed_slider_rect(width: int, height: int):
     x = width - 280 - 12
     y = 12
     return pygame.Rect(x + 90, y + 18, 160, 16)
+
+
+def _compare_speed_slider_rect(width: int, height: int):
+    import pygame
+
+    return pygame.Rect(210, 22, 220, 16)
 
 
 def _slider_value(mouse_x: int, rect, vmin: float, vmax: float) -> float:
@@ -553,6 +713,61 @@ def _compare_button_rect(width: int, height: int):
     x = width - 280 - 12
     y = 12
     return pygame.Rect(x + 10, y + 204, 260, 28)
+
+
+def _start_run_rect(width: int, height: int):
+    import pygame
+
+    return pygame.Rect((width // 2) - 170, height - 170, 340, 40)
+
+
+def _start_train_rect(width: int, height: int):
+    import pygame
+
+    return pygame.Rect((width // 2) - 170, height - 122, 340, 40)
+
+
+def _start_compare_rect(width: int, height: int):
+    import pygame
+
+    return pygame.Rect((width // 2) - 170, height - 74, 340, 40)
+
+
+def _prompt_start_mode(renderer) -> str | None:
+    import pygame
+
+    clock = pygame.time.Clock()
+    while True:
+        _draw_branding_splash(renderer, hint="Choose a mode to begin.", present=False)
+        run_rect = _start_run_rect(renderer.width, renderer.height)
+        train_rect = _start_train_rect(renderer.width, renderer.height)
+        compare_rect = _start_compare_rect(renderer.width, renderer.height)
+
+        for rect, label in (
+            (run_rect, "Run Simulation"),
+            (train_rect, "Train Model"),
+            (compare_rect, "Compare Models"),
+        ):
+            pygame.draw.rect(renderer.screen, (24, 28, 36), rect, border_radius=8)
+            pygame.draw.rect(renderer.screen, (80, 80, 95), rect, width=1, border_radius=8)
+            text = renderer.font.render(label, True, (235, 235, 235))
+            text_rect = text.get_rect(center=rect.center)
+            renderer.screen.blit(text, text_rect)
+        pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+            if event.type == pygame.VIDEORESIZE:
+                renderer.resize(event.w, event.h)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if run_rect.collidepoint(event.pos):
+                    return "run"
+                if train_rect.collidepoint(event.pos):
+                    return "train"
+                if compare_rect.collidepoint(event.pos):
+                    return "compare"
+        clock.tick(60)
 
 
 def _load_default_or_prompt_model(

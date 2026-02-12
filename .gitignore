@@ -24,3 +24,6 @@ Thumbs.db
 
 # Local logs
 DEV_LOG.md
+
+# Nested Python bytecode cache directories
+**/__pycache__/

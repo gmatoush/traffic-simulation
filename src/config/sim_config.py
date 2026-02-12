@@ -19,10 +19,10 @@ CONTROLLER_MODE: str = "baseline"
 # Baseline controller configuration.
 BASELINE_PHASE_DURATION: float = 5.0
 GREEN_PHASE_DURATION: float = 6.0
-YELLOW_PHASE_DURATION: float = 2.0
+YELLOW_PHASE_DURATION: float = 3.0
 
 # RL controller configuration.
-RL_ALGO: str = "DQN"
+RL_ALGO: str = "PPO"
 RL_MODEL_PATH: str = "models/traffic_rl"
 RL_ACTION_REPEAT: int = 5
 RL_CURRICULUM_EPISODES: int = 300

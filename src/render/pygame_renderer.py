@@ -25,7 +25,22 @@ class PygameRenderer:
         self._set_window_icon()
         self.font = pygame.font.Font(None, 24)
         self._flash_timer = 0.0
+        self.palette = {
+            "asphalt": (22, 26, 34),
+            "road": (46, 52, 64),
+            "lane_mark": (210, 210, 210),
+            "lane_mark_dim": (160, 160, 160),
+            "vehicle": (88, 170, 240),
+            "green": (70, 210, 120),
+            "yellow": (240, 200, 90),
+            "red": (225, 80, 80),
+            "hud_text": (235, 235, 235),
+        }
+        self._static_scene_surface: pygame.Surface | None = None
         self._vehicle_sprites: dict[int, pygame.Surface] = {}
+        self._vehicle_sprite_by_instance: dict[int, pygame.Surface] = {}
+        self._transformed_sprite_cache: dict[tuple[int, str, int, int], pygame.Surface] = {}
+        self._dimmed_sprite_cache: dict[int, pygame.Surface] = {}
         self._sprite_pool: dict[str, list[pygame.Surface]] = {}
         self._control_icons: dict[str, pygame.Surface] = {}
         self._load_vehicle_sprites()
@@ -37,6 +52,7 @@ class PygameRenderer:
         self.screen = pygame.display.set_mode(
             (self.width, self.height), pygame.RESIZABLE
         )
+        self._static_scene_surface = None
 
     def _load_vehicle_sprites(self) -> None:
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -107,24 +123,15 @@ class PygameRenderer:
             stats: Optional stats for left-side display.
         """
         self._flash_timer += 1.0 / 60.0
-        self._draw_background()
-
-        # Draw a simple cross intersection.
-        horizontal = pygame.Rect(
-            0, self.height // 2 - self.road_width // 2, self.width, self.road_width
-        )
-        vertical = pygame.Rect(
-            self.width // 2 - self.road_width // 2, 0, self.road_width, self.height
-        )
-        pygame.draw.rect(self.screen, self.palette["road"], horizontal)
-        pygame.draw.rect(self.screen, self.palette["road"], vertical)
-        self._draw_lane_markings()
+        self._draw_static_scene()
+        self._prune_vehicle_sprite_cache(world)
         # Render vehicles as sprites (fallback to rectangles if none loaded).
+        has_any_sprites = any(self._sprite_pool.values())
         for vehicle in getattr(world, "vehicles", []):
             rect = self._vehicle_rect(vehicle)
             if vehicle.__class__.__name__ == "EmergencyVehicle":
                 self._draw_emergency_glow(rect)
-            if any(self._sprite_pool.values()):
+            if has_any_sprites:
                 sprite = self._get_vehicle_sprite(vehicle)
                 sprite = self._orient_and_scale_sprite(sprite, rect, vehicle)
                 if getattr(vehicle, "crashed", False):
@@ -138,6 +145,7 @@ class PygameRenderer:
                 pygame.draw.rect(self.screen, (8, 8, 10), rect, width=1)
 
         self._draw_crash_effects(world)
+        self._draw_crash_banner(world)
 
         # Render central traffic light indicator.
         light = getattr(world, "traffic_light", None)
@@ -202,6 +210,11 @@ class PygameRenderer:
         return self.palette["vehicle"]
 
     def _get_vehicle_sprite(self, vehicle) -> pygame.Surface:
+        instance_key = id(vehicle)
+        cached_instance_sprite = self._vehicle_sprite_by_instance.get(instance_key)
+        if cached_instance_sprite is not None:
+            return cached_instance_sprite
+
         kind = getattr(vehicle, "sprite_kind", "normal")
         category = getattr(vehicle, "sprite_category", "medium")
         seed = getattr(vehicle, "sprite_seed", 0)
@@ -215,13 +228,27 @@ class PygameRenderer:
                 pool = fallback
             chooser = random.Random(seed)
             self._vehicle_sprites[key] = chooser.choice(pool)
-        return self._vehicle_sprites[key]
+        chosen = self._vehicle_sprites[key]
+        self._vehicle_sprite_by_instance[instance_key] = chosen
+        return chosen
+
+    def _prune_vehicle_sprite_cache(self, world) -> None:
+        vehicles = getattr(world, "vehicles", [])
+        active_ids = {id(v) for v in vehicles}
+        stale = [k for k in self._vehicle_sprite_by_instance.keys() if k not in active_ids]
+        for key in stale:
+            self._vehicle_sprite_by_instance.pop(key, None)
 
     def _orient_and_scale_sprite(
         self, sprite: pygame.Surface, rect: pygame.Rect, vehicle
     ) -> pygame.Surface:
         lane = getattr(vehicle, "lane", None)
         lane_value = getattr(lane, "value", lane)
+        cache_key = (id(sprite), str(lane_value), rect.width, rect.height)
+        cached = self._transformed_sprite_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         oriented = sprite
         # Sprites are vertical; rotate/flip based on travel direction.
         if lane_value == "NORTH":
@@ -231,13 +258,18 @@ class PygameRenderer:
         elif lane_value == "WEST":
             oriented = pygame.transform.rotate(oriented, -90)
         scaled = pygame.transform.smoothscale(oriented, (rect.width, rect.height))
+        self._transformed_sprite_cache[cache_key] = scaled
         return scaled
 
     def _dim_sprite(self, sprite: pygame.Surface) -> pygame.Surface:
+        cached = self._dimmed_sprite_cache.get(id(sprite))
+        if cached is not None:
+            return cached
         dimmed = sprite.copy()
         overlay = pygame.Surface(dimmed.get_size(), pygame.SRCALPHA)
         overlay.fill((60, 60, 60, 160))
         dimmed.blit(overlay, (0, 0))
+        self._dimmed_sprite_cache[id(sprite)] = dimmed
         return dimmed
 
     def _traffic_light_colors(self, light) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
@@ -294,7 +326,8 @@ class PygameRenderer:
     def _draw_controls(self, controls: dict) -> None:
         """Draw on-screen sliders/toggles for runtime control."""
         panel_w = 280
-        panel_h = 262
+        show_mode_algo = "mode" in controls or "algo" in controls
+        panel_h = 312 if show_mode_algo else 242
         x = self.width - panel_w - 12
         y = 12
         panel = pygame.Rect(x, y, panel_w, panel_h)
@@ -304,48 +337,76 @@ class PygameRenderer:
         speed = float(controls.get("speed", 1.0))
         risk_label = str(controls.get("risk_label", "LOW")).upper()
         phase_label = str(controls.get("phase", ""))
+        mode_label = str(controls.get("mode", "")).upper()
+        algo_label = str(controls.get("algo", "")).upper()
 
         label_color = self.palette["hud_text"]
         self.screen.blit(self.font.render(f"Speed: {speed:.2f}x", True, label_color), (x + 10, y + 8))
         self.screen.blit(self.font.render(f"Spawn Rate: {risk_label}", True, label_color), (x + 10, y + 44))
-        # Phase display removed per request.
+        if phase_label:
+            self.screen.blit(self.font.render(phase_label, True, label_color), (x + 10, y + 62))
 
         self._draw_slider(x + 90, y + 18, 160, speed, 0.5, 2.0)
         # Risk is a toggle (LOW/MED/HIGH), so no slider is drawn.
         self._draw_icon_button(x + 10, y + 82, 120, 44, "play")
         self._draw_icon_button(x + 150, y + 82, 120, 44, "stop")
-        uniform = bool(controls.get("uniform_speed", False))
-        self.screen.blit(self.font.render("Uniform Speed", True, label_color), (x + 10, y + 136))
-        self._draw_checkbox(x + 150, y + 134, 18, uniform)
-        self._draw_button(x + 10, y + 170, 120, 28, "Save Model")
-        self._draw_button(x + 150, y + 170, 120, 28, "Load Model")
+        self._draw_button(x + 10, y + 136, 260, 28, "Load Model")
+        self._draw_button(x + 10, y + 170, 260, 28, "Train Model")
+        if show_mode_algo:
+            self.screen.blit(self.font.render("Mode", True, label_color), (x + 10, y + 214))
+            self._draw_button(x + 90, y + 208, 180, 28, mode_label)
+            self.screen.blit(self.font.render("Algo", True, label_color), (x + 10, y + 250))
+            self._draw_button(x + 90, y + 244, 180, 28, algo_label)
 
     def _draw_left_stats(self, stats: dict) -> None:
         """Draw key metrics on the upper-left."""
-        panel_w = 260
-        panel_h = 120
-        x = 12
-        y = 12
-        panel = pygame.Rect(x, y, panel_w, panel_h)
-        pygame.draw.rect(self.screen, (15, 18, 24), panel, border_radius=6)
-        pygame.draw.rect(self.screen, (60, 60, 70), panel, width=1, border_radius=6)
-        x += 10
-        y += 8
+        panel_x = 12
+        panel_y = 12
+        x = panel_x + 10
+        y = panel_y + 8
         avg_wait = stats.get("avg_wait", None)
         learn = stats.get("learning", None)
         elapsed = stats.get("elapsed", None)
+        throughput = stats.get("throughput", None)
+        completed = stats.get("completed", None)
+        crashes_per_min = stats.get("crashes_per_min", None)
 
+        elapsed_surface = None
+        elapsed_h = 0
+        elapsed_w = 0
         if elapsed is not None:
             big_font = pygame.font.Font(None, 40)
-            surface = big_font.render(f"Elapsed: {elapsed:.1f}s", True, self.palette["hud_text"])
-            self.screen.blit(surface, (x, y))
-            y += 34
+            elapsed_surface = big_font.render(
+                f"Elapsed: {elapsed:.1f}s", True, self.palette["hud_text"]
+            )
+            elapsed_w = elapsed_surface.get_width()
+            elapsed_h = 34
 
         lines = []
         if avg_wait is not None:
             lines.append(f"Avg stopped wait: {avg_wait:.2f}s")
+        if throughput is not None:
+            lines.append(f"Vehicles per minute (vehicles/min): {throughput:.1f}")
+        if crashes_per_min is not None:
+            lines.append(f"Crashes per minute (crashes/min): {crashes_per_min:.2f}")
+        if completed is not None:
+            lines.append(f"Vehicles cleared: {int(completed)}")
         if learn is not None:
             lines.append(f"Avg reward(100): {learn:.2f}")
+
+        line_width = 0
+        for line in lines:
+            line_width = max(line_width, self.font.size(line)[0])
+        content_w = max(elapsed_w, line_width)
+        panel_w = max(260, content_w + 20)
+        panel_h = 16 + elapsed_h + (18 * len(lines)) + 8
+        panel = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+        pygame.draw.rect(self.screen, (15, 18, 24), panel, border_radius=6)
+        pygame.draw.rect(self.screen, (60, 60, 70), panel, width=1, border_radius=6)
+
+        if elapsed_surface is not None:
+            self.screen.blit(elapsed_surface, (x, y))
+            y += elapsed_h
         for line in lines:
             surface = self.font.render(line, True, self.palette["hud_text"])
             self.screen.blit(surface, (x, y))
@@ -371,6 +432,22 @@ class PygameRenderer:
             color = (220, 60, 60)
             pygame.draw.line(self.screen, color, (cx - size, cy - size), (cx + size, cy + size), 3)
             pygame.draw.line(self.screen, color, (cx - size, cy + size), (cx + size, cy - size), 3)
+
+    def _draw_crash_banner(self, world) -> None:
+        """Draw a clear banner when any crashed vehicle is present."""
+        crashed = any(getattr(v, "crashed", False) for v in getattr(world, "vehicles", []))
+        if not crashed:
+            return
+        banner_w = 300
+        banner_h = 44
+        x = (self.width - banner_w) // 2
+        y = 14
+        rect = pygame.Rect(x, y, banner_w, banner_h)
+        pygame.draw.rect(self.screen, (130, 20, 20), rect, border_radius=8)
+        pygame.draw.rect(self.screen, (245, 215, 215), rect, width=2, border_radius=8)
+        text = self.font.render("CRASH DETECTED - RESETTING...", True, (255, 240, 240))
+        text_rect = text.get_rect(center=rect.center)
+        self.screen.blit(text, text_rect)
 
     def _draw_slider(
         self, x: int, y: int, width: int, value: float, vmin: float, vmax: float
@@ -408,19 +485,8 @@ class PygameRenderer:
         self.screen.blit(target, icon_rect)
 
 
-    def _draw_background(self) -> None:
-        self.palette = {
-            "asphalt": (22, 26, 34),
-            "road": (46, 52, 64),
-            "lane_mark": (210, 210, 210),
-            "lane_mark_dim": (160, 160, 160),
-            "vehicle": (88, 170, 240),
-            "green": (70, 210, 120),
-            "yellow": (240, 200, 90),
-            "red": (225, 80, 80),
-            "hud_text": (235, 235, 235),
-        }
-        self.screen.fill(self.palette["asphalt"])
+    def _draw_background(self, surface: pygame.Surface) -> None:
+        surface.fill(self.palette["asphalt"])
 
         # Subtle vignette
         vignette = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
@@ -430,9 +496,9 @@ class PygameRenderer:
             (0, 0, 0, 0),
             pygame.Rect(60, 60, self.width - 120, self.height - 120),
         )
-        self.screen.blit(vignette, (0, 0))
+        surface.blit(vignette, (0, 0))
 
-    def _draw_lane_markings(self) -> None:
+    def _draw_lane_markings(self, surface: pygame.Surface) -> None:
         center_x = self.width // 2
         center_y = self.height // 2
         # Dashed yellow center lines for two-way roads.
@@ -445,7 +511,7 @@ class PygameRenderer:
         y = 0
         while y < self.height:
             pygame.draw.line(
-                self.screen,
+                surface,
                 center_color,
                 (center_x, y),
                 (center_x, min(self.height, y + dash)),
@@ -457,13 +523,33 @@ class PygameRenderer:
         x = 0
         while x < self.width:
             pygame.draw.line(
-                self.screen,
+                surface,
                 center_color,
                 (x, center_y),
                 (min(self.width, x + dash), center_y),
                 center_width,
             )
             x += dash + gap
+
+    def _draw_static_scene(self) -> None:
+        if (
+            self._static_scene_surface is None
+            or self._static_scene_surface.get_width() != self.width
+            or self._static_scene_surface.get_height() != self.height
+        ):
+            scene = pygame.Surface((self.width, self.height))
+            self._draw_background(scene)
+            horizontal = pygame.Rect(
+                0, self.height // 2 - self.road_width // 2, self.width, self.road_width
+            )
+            vertical = pygame.Rect(
+                self.width // 2 - self.road_width // 2, 0, self.road_width, self.height
+            )
+            pygame.draw.rect(scene, self.palette["road"], horizontal)
+            pygame.draw.rect(scene, self.palette["road"], vertical)
+            self._draw_lane_markings(scene)
+            self._static_scene_surface = scene
+        self.screen.blit(self._static_scene_surface, (0, 0))
 
     def _flashing_emergency_color(self) -> tuple[int, int, int]:
         # Flash between red and blue.

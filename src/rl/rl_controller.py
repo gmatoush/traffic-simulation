@@ -22,12 +22,15 @@ class RLController:
             ) from exc
 
         if algo == "PPO":
-            self._model = PPO.load(self.model_path)
+            self._model = PPO.load(self.model_path, device="cpu")
         elif algo == "DQN":
-            self._model = DQN.load(self.model_path)
+            self._model = DQN.load(self.model_path, device="cpu")
         else:
             raise ValueError(f"Unsupported RL algorithm: {self.algo}")
 
     def act(self, obs) -> int:
         action, _ = self._model.predict(obs, deterministic=True)
         return int(action)
+
+    def save(self, path: str) -> None:
+        self._model.save(path)

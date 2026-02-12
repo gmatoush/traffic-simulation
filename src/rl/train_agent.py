@@ -1,4 +1,4 @@
-"""Train a PPO/DQN agent on the traffic environment."""
+"""Train a PPO agent on the traffic environment (headless only)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ if SRC not in sys.path:
 
 from config.sim_config import (
     RL_ACTION_REPEAT,
-    RL_ALGO,
     RL_CURRICULUM_EPISODES,
+    RL_ALGO,
     RL_MODEL_PATH,
     RL_TRAIN_TIMESTEPS,
 )
@@ -52,123 +52,143 @@ def _is_name_key(key: str | None) -> bool:
     return key in ("n", "N")
 
 
+def _make_env(
+    episode_length: int,
+    uniform_speed: bool,
+    use_curriculum: bool,
+    curriculum_episodes: int,
+) -> TrafficEnv:
+    env = TrafficEnv(
+        render_enabled=False,
+        max_steps=episode_length,
+        action_repeat=RL_ACTION_REPEAT,
+        use_curriculum=use_curriculum,
+        curriculum_episodes=curriculum_episodes,
+        reset_on_crash=False,
+        crash_pause_duration=0.0,
+    )
+    env.world.uniform_speed_enabled = uniform_speed
+    return env
+
+
 def train(
     algo: str = RL_ALGO,
     timesteps: int = RL_TRAIN_TIMESTEPS,
+    episodes: int | None = None,
+    episode_steps: int | None = None,
     model_path: str = RL_MODEL_PATH,
     uniform_speed: bool = False,
     fast: bool = False,
+    eval_interval: int = 5000,
+    eval_episodes: int = 5,
 ) -> None:
-    # Keep headless training fully compatible with the rendered UI model.
-    algo = "DQN"
+    algo = algo.upper()
+    if algo != "PPO":
+        raise ValueError("Only PPO is supported for training.")
+    if eval_interval <= 0:
+        raise ValueError("eval_interval must be positive")
+    if eval_episodes <= 0:
+        raise ValueError("eval_episodes must be positive")
+    if episodes is not None and episodes <= 0:
+        raise ValueError("episodes must be positive when provided")
+    if episode_steps is not None and episode_steps <= 0:
+        raise ValueError("episode_steps must be positive when provided")
+
     try:
-        from stable_baselines3 import DQN, PPO
+        from stable_baselines3 import PPO
+        from stable_baselines3.common.evaluation import evaluate_policy
+        from stable_baselines3.common.vec_env import DummyVecEnv
     except ImportError as exc:  # pragma: no cover - runtime dependency
         raise ImportError(
             "stable-baselines3 is required for training. Install it before running."
         ) from exc
+
     try:
         import torch
     except Exception:
         torch = None
 
-    from stable_baselines3.common.vec_env import DummyVecEnv
-
-    # Headless training: no rendering and no artificial pacing.
-    # Use finite episodes and loop forever across episodes.
-    episode_length = 2000 if fast else 5000
+    episode_length = episode_steps if episode_steps is not None else (2000 if fast else 5000)
     n_envs = 12 if fast else 1
+    env = DummyVecEnv(
+        [
+            (lambda: _make_env(episode_length, uniform_speed, True, RL_CURRICULUM_EPISODES))
+            for _ in range(n_envs)
+        ]
+    )
+    eval_env = DummyVecEnv(
+        [
+            (lambda: _make_env(episode_length, uniform_speed, False, RL_CURRICULUM_EPISODES))
+        ]
+    )
 
-    def _make_env():
-        env = TrafficEnv(
-            render_enabled=False,
-            max_steps=episode_length,
-            action_repeat=RL_ACTION_REPEAT,
-            use_curriculum=True,
-            curriculum_episodes=RL_CURRICULUM_EPISODES,
-        )
-        env.world.uniform_speed_enabled = uniform_speed
-        return env
-
-    env = DummyVecEnv([_make_env for _ in range(n_envs)])
     models_dir = os.path.dirname(model_path) or os.getcwd()
     checkpoint_dir = os.path.join(models_dir, "checkpoint")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    train_freq = 4 if fast else 1
-    gradient_steps = 4 if fast else 1
-    batch_size = 64 if fast else 32
-    buffer_size = 50000 if fast else 5000
-    learning_starts = 1000 if fast else 100
-
     device = "cpu"
-    if torch is not None and getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+    if (
+        torch is not None
+        and getattr(torch, "cuda", None) is not None
+        and torch.cuda.is_available()
+    ):
         device = "cuda"
 
-    model = DQN(
+    model = PPO(
         "MultiInputPolicy",
         env,
         verbose=0,
-        buffer_size=buffer_size,
-        learning_starts=learning_starts,
-        batch_size=batch_size,
-        train_freq=train_freq,
-        gradient_steps=gradient_steps,
+        n_steps=256,
+        batch_size=128 if fast else 64,
+        gamma=0.99,
+        gae_lambda=0.95,
+        ent_coef=0.01,
+        learning_rate=3e-4,
         device=device,
     )
 
-    print("Training headless. Press 'y' to stop and save. Press 's' for stats. Press 'n' to set filename.")
-    episodes = 0
-    last_avg_reward = 0.0
-    best_avg_reward = float("-inf")
-    reward_buffer: list[float] = []
+    print(
+        "Headless training started. Press 'y' to stop and save, "
+        "'s' for live stats, 'n' to rename output."
+    )
+    trained_steps = 0
+    best_eval_reward = float("-inf")
     checkpoint_best_path = os.path.join(checkpoint_dir, "best_model.zip")
     checkpoint_latest_path = os.path.join(checkpoint_dir, "latest_model.zip")
-    checkpoint_interval_episodes = 5
     live_stats = False
+    if episodes is not None:
+        target_timesteps = max(0, int(episodes) * int(episode_length))
+    else:
+        target_timesteps = max(0, int(timesteps))
 
-    class RewardTracker:
-        def __init__(self, buf):
-            self.buf = buf
-
-        def __call__(self, locals_, globals_):
-            rewards = locals_.get("rewards", None)
-            if rewards is not None:
-                try:
-                    if hasattr(rewards, "__len__"):
-                        self.buf.append(float(sum(rewards) / len(rewards)))
-                    else:
-                        self.buf.append(float(rewards))
-                    if len(self.buf) > 2000:
-                        self.buf.pop(0)
-                except Exception:
-                    pass
-            return True
-
-    reward_cb = RewardTracker(reward_buffer)
     while True:
-        # Train in full-episode chunks so loops align to episode boundaries.
+        remaining = None if target_timesteps == 0 else (target_timesteps - trained_steps)
+        if remaining is not None and remaining <= 0:
+            break
+        block_steps = eval_interval if remaining is None else min(eval_interval, remaining)
+
         model.learn(
-            total_timesteps=episode_length * n_envs,
+            total_timesteps=block_steps,
             reset_num_timesteps=False,
             progress_bar=False,
-            callback=reward_cb,
         )
-        episodes += 1
-        avg_reward = _compute_avg_reward(model, last_avg_reward)
-        if reward_buffer:
-            avg_reward = sum(reward_buffer) / len(reward_buffer)
-        last_avg_reward = avg_reward
+        trained_steps += block_steps
 
-        if avg_reward > best_avg_reward:
-            best_avg_reward = avg_reward
+        mean_reward, std_reward = evaluate_policy(
+            model,
+            eval_env,
+            n_eval_episodes=eval_episodes,
+            deterministic=True,
+            render=False,
+        )
+        try:
+            model.save(checkpoint_latest_path)
+        except Exception:
+            pass
+        if mean_reward > best_eval_reward:
+            best_eval_reward = mean_reward
             try:
                 model.save(checkpoint_best_path)
-            except Exception:
-                pass
-        if episodes % checkpoint_interval_episodes == 0:
-            try:
-                model.save(checkpoint_latest_path)
             except Exception:
                 pass
 
@@ -179,51 +199,81 @@ def train(
                 model_path = os.path.join(models_dir, f"{new_name}.zip")
         if _is_stats_key(key):
             live_stats = not live_stats
-            if live_stats:
-                print("\n" * 5)
-                print("Live stats ON (press 's' to stop updates). Press 'y' to stop and save. Press 'n' to set filename.")
-            else:
-                print("\n" * 2)
-                print("Live stats OFF. Press 's' to show updates again.")
         if _is_stop_key(key):
-            if live_stats:
-                sys.stdout.write("\n")
             break
+
+        completed_episodes = trained_steps / float(max(1, episode_length))
+        if target_timesteps == 0:
+            target_episodes: str | float = "unbounded"
+        else:
+            target_episodes = target_timesteps / float(max(1, episode_length))
+
         if live_stats:
             line = (
-                f"\rEpisodes: {episodes} | "
-                f"Avg reward (rolling): {avg_reward:.2f} | "
-                f"Best: {best_avg_reward:.2f} | "
-                f"Device: {device} | "
-                f"Model: {os.path.basename(model_path)}"
+                f"\rAlgo: {algo} | Episodes: {completed_episodes:.1f}/{target_episodes} | "
+                f"Eval mean: {mean_reward:.2f} +/- {std_reward:.2f} | "
+                f"Best eval: {best_eval_reward:.2f} | "
+                f"Device: {device} | Model: {os.path.basename(model_path)}"
             )
             sys.stdout.write(line)
             sys.stdout.flush()
+        else:
+            print(
+                f"Episodes: {completed_episodes:.1f} | Eval mean: {mean_reward:.2f} +/- {std_reward:.2f} | "
+                f"Best eval: {best_eval_reward:.2f}"
+            )
+
+    if live_stats:
+        sys.stdout.write("\n")
     model.save(model_path)
-
-
-def _compute_avg_reward(model, fallback: float) -> float:
-    """Compute average reward from SB3 buffers; fall back to last value."""
-    ep_buf = getattr(model, "ep_info_buffer", None)
-    if ep_buf:
-        rewards = [info.get("r", 0.0) for info in ep_buf if isinstance(info, dict)]
-        if rewards:
-            return sum(rewards) / len(rewards)
-    logger = getattr(model, "logger", None)
-    if logger is not None:
-        value = logger.name_to_value.get("rollout/ep_rew_mean", None)
-        if value is not None:
-            try:
-                return float(value)
-            except Exception:
-                pass
-    return float(fallback)
+    print(f"Saved model to {model_path}.zip")
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Headless training runner.")
+    parser.add_argument(
+        "--algo",
+        choices=["PPO", "ppo"],
+        default=RL_ALGO,
+        help="RL algorithm to train (PPO only).",
+    )
+    parser.add_argument(
+        "--timesteps",
+        type=int,
+        default=RL_TRAIN_TIMESTEPS,
+        help="Total training timesteps. Use 0 for unbounded training.",
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=None,
+        help="Optional episode count. If set, total steps = episodes * episode-steps.",
+    )
+    parser.add_argument(
+        "--episode-steps",
+        type=int,
+        default=None,
+        help="Optional steps per episode (default: 2000 fast / 5000 normal).",
+    )
+    parser.add_argument(
+        "--model-path",
+        default=RL_MODEL_PATH,
+        help="Output model path (without extension is fine).",
+    )
+    parser.add_argument(
+        "--eval-interval",
+        type=int,
+        default=5000,
+        help="Evaluation cadence in timesteps.",
+    )
+    parser.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=5,
+        help="Number of deterministic episodes per evaluation pass.",
+    )
     parser.add_argument(
         "--uniform-speed",
         action="store_true",
@@ -235,4 +285,14 @@ if __name__ == "__main__":
         help="Enable parallel headless training for maximum throughput.",
     )
     args = parser.parse_args()
-    train(uniform_speed=args.uniform_speed, fast=args.fast)
+    train(
+        algo=args.algo,
+        timesteps=args.timesteps,
+        episodes=args.episodes,
+        episode_steps=args.episode_steps,
+        model_path=args.model_path,
+        uniform_speed=args.uniform_speed,
+        fast=args.fast,
+        eval_interval=args.eval_interval,
+        eval_episodes=args.eval_episodes,
+    )

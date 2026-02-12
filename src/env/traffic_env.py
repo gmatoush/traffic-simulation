@@ -37,13 +37,17 @@ WAIT_TIME_PENALTY = -0.05
 SWITCH_PENALTY = -0.1
 INVALID_SWITCH_PENALTY = -0.2
 # Small positive rewards to stabilize learning (must not outweigh crash penalties).
-NO_CRASH_BONUS = 1.0
-LOW_QUEUE_BONUS = 0.5
+NO_CRASH_BONUS = 2.0
+LOW_QUEUE_BONUS = 1.0
 LOW_QUEUE_THRESHOLD = 4
-FLOW_BONUS = 0.2
-DELTA_WAIT_REWARD = 0.35
-DELTA_QUEUE_REWARD = 0.5
+FLOW_BONUS = 0.5
+DELTA_WAIT_REWARD = 0.6
+DELTA_QUEUE_REWARD = 0.8
+EMERGENCY_CLEAR_BONUS = 2.0
+CLEAR_INTERSECTION_BONUS = 1.0
 QUEUE_NORMALIZER = 40.0
+WAIT_NORMALIZER = 200.0
+REWARD_CLIP = 150.0
 
 @dataclass
 class TrafficEnv(gym.Env):
@@ -54,6 +58,8 @@ class TrafficEnv(gym.Env):
     action_repeat: int = RL_ACTION_REPEAT
     use_curriculum: bool = False
     curriculum_episodes: int = RL_CURRICULUM_EPISODES
+    reset_on_crash: bool = False
+    crash_pause_duration: float | None = None
     emergency_wait_penalty: float = abs(EMERGENCY_WAIT_PENALTY)
     crash_penalty: float = abs(CRASH_PENALTY_PER_VEHICLE)
     wait_weight: float = abs(WAIT_TIME_PENALTY)
@@ -69,6 +75,12 @@ class TrafficEnv(gym.Env):
         self.world = World(traffic_light=TrafficLight())
         self._renderer = None
         self._prev_vehicle_count = 0
+        self._crash_pause_remaining = 0.0
+        if self.crash_pause_duration is None:
+            if self.render_enabled:
+                self.crash_pause_duration = float(self.world.crash_freeze_duration)
+            else:
+                self.crash_pause_duration = 0.0
 
         if self.render_enabled:
             from render.pygame_renderer import PygameRenderer
@@ -81,6 +93,14 @@ class TrafficEnv(gym.Env):
                 "queue_lengths": spaces.Box(
                     low=0.0, high=1.0, shape=(len(Lane),), dtype=np.float32
                 ),
+                "lane_waits": spaces.Box(
+                    low=0.0, high=1.0, shape=(len(Lane),), dtype=np.float32
+                ),
+                "stopped_ratio": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+                "phase_time_remaining": spaces.Box(
+                    low=0.0, high=1.0, shape=(1,), dtype=np.float32
+                ),
+                "can_switch": spaces.Discrete(2),
                 "emergency_waiting": spaces.Discrete(2),
                 "light_phase": spaces.Discrete(len(TrafficPhase)),
             }
@@ -95,6 +115,7 @@ class TrafficEnv(gym.Env):
         if self.use_curriculum:
             self._apply_curriculum()
         self._prev_vehicle_count = 0
+        self._crash_pause_remaining = 0.0
         self._episodes += 1
         return self._get_obs(), {}
 
@@ -102,10 +123,30 @@ class TrafficEnv(gym.Env):
         if not self.action_space.contains(action):
             raise ValueError(f"Invalid action {action}; expected 0 or 1.")
 
+        if self._crash_pause_remaining > 0.0:
+            pause_step = self.dt * self.action_repeat
+            self._crash_pause_remaining = max(0.0, self._crash_pause_remaining - pause_step)
+            info = {
+                "action_mask": np.array([1, 0], dtype=np.int8),
+                "crash_events": 0,
+                "crashed_count": sum(
+                    1 for v in self.world.vehicles if getattr(v, "crashed", False)
+                ),
+                "crash_paused": True,
+                "crash_pause_remaining": self._crash_pause_remaining,
+            }
+            if self._crash_pause_remaining <= 0.0 and self.reset_on_crash:
+                reset_obs, _ = self.reset()
+                info["auto_reset"] = True
+                info["crash_paused"] = False
+                return reset_obs, 0.0, False, False, info
+            return self._get_obs(), 0.0, False, False, info
+
         prev_total_wait = self.total_wait_time()
         prev_waiting_count = sum(
             1 for v in self.world.vehicles if getattr(v, "wait_time", 0.0) > 0.0
         )
+        prev_emergency_waiting = int(self.world.emergency_waiting())
         prev_count = len(self.world.vehicles)
         invalid_switch = False
         phase_switched = False
@@ -149,8 +190,18 @@ class TrafficEnv(gym.Env):
         flow_bonus = FLOW_BONUS * cleared
         delta_wait_reward = DELTA_WAIT_REWARD * (prev_total_wait - total_wait)
         delta_queue_reward = DELTA_QUEUE_REWARD * (prev_waiting_count - waiting_count)
+        emergency_clear_bonus = (
+            EMERGENCY_CLEAR_BONUS
+            if prev_emergency_waiting == 1 and not self.world.emergency_waiting()
+            else 0.0
+        )
+        clear_intersection_bonus = (
+            CLEAR_INTERSECTION_BONUS
+            if waiting_count == 0 and len(self.world.vehicles) <= 2
+            else 0.0
+        )
 
-        reward = (
+        raw_reward = (
             crash_penalty
             + emergency_penalty
             + queue_penalty
@@ -162,12 +213,35 @@ class TrafficEnv(gym.Env):
             + flow_bonus
             + delta_wait_reward
             + delta_queue_reward
+            + emergency_clear_bonus
+            + clear_intersection_bonus
         )
+        reward = float(np.clip(raw_reward, -REWARD_CLIP, REWARD_CLIP))
 
-        terminated = False
+        crash_happened = crashed_count > 0 or crash_events > 0
+        terminated = crash_happened
         truncated = self._steps >= self.max_steps
-        info = {"action_mask": self._action_mask()}
-        return self._get_obs(), reward, terminated, truncated, info
+        obs = self._get_obs()
+        info = {
+            "action_mask": self._action_mask(),
+            "crash_events": crash_events,
+            "crashed_count": crashed_count,
+            "reward_raw": raw_reward,
+            "terminal_observation": obs,
+        }
+
+        if crash_happened and self.reset_on_crash:
+            self._crash_pause_remaining = float(max(0.0, self.crash_pause_duration or 0.0))
+            if self._crash_pause_remaining > 0.0:
+                info["crash_paused"] = True
+                info["crash_pause_remaining"] = self._crash_pause_remaining
+                return obs, reward, False, False, info
+            reset_obs, _ = self.reset()
+            info["auto_reset"] = True
+            info["crash_paused"] = False
+            return reset_obs, reward, False, False, info
+
+        return obs, reward, terminated, truncated, info
 
     def render(self) -> None:
         if self._renderer is None:
@@ -190,10 +264,31 @@ class TrafficEnv(gym.Env):
             [len(self.world.lane_queues[lane]) for lane in Lane], dtype=np.float32
         )
         queue_lengths = np.clip(queue_lengths / QUEUE_NORMALIZER, 0.0, 1.0)
+        lane_waits = np.array(
+            [
+                sum(getattr(v, "wait_time", 0.0) for v in self.world.lane_queues[lane])
+                for lane in Lane
+            ],
+            dtype=np.float32,
+        )
+        lane_waits = np.clip(lane_waits / WAIT_NORMALIZER, 0.0, 1.0)
+        vehicle_count = len(self.world.vehicles)
+        waiting_count = sum(
+            1 for v in self.world.vehicles if getattr(v, "wait_time", 0.0) > 0.0
+        )
+        stopped_ratio = 0.0 if vehicle_count == 0 else waiting_count / float(vehicle_count)
+        light = self.world.traffic_light
+        phase_duration = max(1e-6, light._current_phase_min_duration())
+        phase_time_remaining = max(0.0, phase_duration - light.phase_timer) / phase_duration
+        can_switch = 1 if light.can_switch() else 0
         emergency_waiting = int(self.world.emergency_waiting())
-        phase_index = list(TrafficPhase).index(self.world.traffic_light.current_phase)
+        phase_index = list(TrafficPhase).index(light.current_phase)
         return {
             "queue_lengths": queue_lengths,
+            "lane_waits": lane_waits,
+            "stopped_ratio": np.array([stopped_ratio], dtype=np.float32),
+            "phase_time_remaining": np.array([phase_time_remaining], dtype=np.float32),
+            "can_switch": can_switch,
             "emergency_waiting": emergency_waiting,
             "light_phase": phase_index,
         }

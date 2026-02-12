@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import math
 import random
 from typing import Dict, List
 
@@ -53,7 +54,7 @@ class World:
     # Stop line is placed before the intersection to prevent entering on red.
     stop_line_distance: float = 80.0
     min_follow_gap: float = 55.0
-    max_spawns_per_lane_per_tick: int = 4
+    max_spawns_per_lane_per_tick: int = 2
     lane_offset: float = 30.0
     render_road_width: float = 120.0
     crash_freeze_duration: float = 5.0
@@ -61,11 +62,13 @@ class World:
         default_factory=lambda: {lane: 0.0 for lane in Lane}
     )
     crash_events: int = 0
+    total_crashes: int = 0
     emergency_enabled: bool = True
     risk_factor: float = 0.0
-    uniform_speed_enabled: bool = False
-    uniform_speed_value: float = 26.0
-    max_vehicles: int = 20
+    uniform_speed_enabled: bool = True
+    uniform_speed_value: float = 32.0
+    max_vehicles: int = 12
+    completed_vehicles: int = 0
     emergency_spawn_timer: float = 0.0
     emergency_spawn_interval: float = 0.0
     traffic_light: object | None = None
@@ -175,6 +178,7 @@ class World:
         for lane in Lane:
             self.lane_freeze_timers[lane] = self.crash_freeze_duration
         self.crash_events += 1
+        self.total_crashes += 1
 
     def _update_freeze_timers(self, dt: float) -> None:
         for lane in list(self.lane_freeze_timers.keys()):
@@ -320,36 +324,36 @@ class World:
                 queue.remove(vehicle)
             if vehicle in self.vehicles:
                 self.vehicles.remove(vehicle)
+                self.completed_vehicles += 1
 
-    def spawn_cars(self) -> None:
-        """Spawn cars randomly per lane based on configured probabilities."""
+    @staticmethod
+    def _scaled_spawn_probability(base_prob: float, dt: float, base_dt: float = 0.1) -> float:
+        """Convert per-base-tick probability to the current timestep."""
+        if base_prob <= 0.0:
+            return 0.0
+        if base_prob >= 1.0:
+            return 1.0
+        hazard = -math.log1p(-base_prob) / max(base_dt, 1e-6)
+        return 1.0 - math.exp(-hazard * max(dt, 0.0))
+
+    def spawn_cars(self, dt: float) -> None:
+        """Spawn cars with rate-stable probabilities across timestep sizes."""
         # Reserve a slot for emergencies so the toggle can actually spawn them.
         effective_max = self.max_vehicles - (1 if self.emergency_enabled else 0)
         for lane, probability in self.car_spawn_probabilities.items():
+            scaled_probability = self._scaled_spawn_probability(probability, dt)
             for _ in range(self.max_spawns_per_lane_per_tick):
                 if len(self.vehicles) >= effective_max:
                     return
-                if random.random() >= probability:
+                if random.random() >= scaled_probability:
                     continue
                 position = -self.entry_distance if lane in (Lane.NORTH, Lane.WEST) else self.entry_distance
                 # If the entry is occupied, stack new spawns behind the last vehicle.
                 queue = self.lane_queues[lane]
                 entry_direction, exit_direction = self._lane_directions(lane)
-                if self.uniform_speed_enabled:
-                    speed_category = "medium"
-                    speed = self.uniform_speed_value
-                    gap = random.uniform(self.min_follow_gap * 0.9, self.min_follow_gap * 1.1)
-                else:
-                    speed_category = random.choice(["slow", "medium", "fast"])
-                    if speed_category == "slow":
-                        speed = random.uniform(5.0, 8.0)
-                        gap = random.uniform(self.min_follow_gap * 0.6, self.min_follow_gap * 0.8)
-                    elif speed_category == "fast":
-                        speed = random.uniform(22.0, 30.0)
-                        gap = random.uniform(self.min_follow_gap * 1.2, self.min_follow_gap * 1.5)
-                    else:
-                        speed = random.uniform(12.0, 16.0)
-                        gap = random.uniform(self.min_follow_gap * 0.9, self.min_follow_gap * 1.1)
+                speed_category = "medium"
+                speed = self.uniform_speed_value
+                gap = random.uniform(self.min_follow_gap * 0.9, self.min_follow_gap * 1.1)
                 gap = max(self.min_follow_gap, gap)
                 speed *= 1.0 + 0.75 * self.risk_factor
                 if queue:
@@ -399,7 +403,7 @@ class World:
         entry_direction, exit_direction = self._lane_directions(lane)
         gap = random.uniform(self.min_follow_gap * 1.1, self.min_follow_gap * 1.4)
         gap = max(self.min_follow_gap, gap)
-        speed = random.uniform(18.0, 24.0)
+        speed = self.uniform_speed_value
         speed *= 1.0 + 0.75 * self.risk_factor
         if queue:
             direction = self._lane_direction(lane)
@@ -469,7 +473,7 @@ class World:
         self.time += dt
         if self.emergency_enabled:
             self.emergency_spawn_timer += dt
-        self.spawn_cars()
+        self.spawn_cars(dt)
         self.spawn_emergency_vehicles()
 
         self._update_freeze_timers(dt)
@@ -517,8 +521,22 @@ class World:
         return (x - half_l, y - half_w, x + half_l, y + half_w)
 
     def _detect_collisions(self) -> None:
-        """Crash vehicles when any two overlap in world space."""
-        vehicles = list(self.vehicles)
+        """Crash vehicles when any two overlap near the intersection only."""
+        intersection_half_size = self.render_road_width / 2.0 + 10.0
+        candidates = []
+        for vehicle in self.vehicles:
+            bbox = self._vehicle_world_bbox(vehicle)
+            # Ignore collisions outside the intersection region for performance/stability.
+            if (
+                bbox[2] < -intersection_half_size
+                or bbox[0] > intersection_half_size
+                or bbox[3] < -intersection_half_size
+                or bbox[1] > intersection_half_size
+            ):
+                continue
+            candidates.append(vehicle)
+
+        vehicles = list(candidates)
         if len(vehicles) <= 1:
             return
         for i in range(len(vehicles)):

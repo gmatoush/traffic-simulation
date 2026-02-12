@@ -21,6 +21,47 @@ def _resource_path(*parts: str) -> str:
     return os.path.join(base, *parts)
 
 
+def _runtime_app_dir() -> str:
+    """Directory that should hold user-editable runtime files (models, logs, etc.)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.getcwd()
+
+
+def _machine_models_dir() -> str:
+    """Per-machine/per-user persistent model directory."""
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "TrafficSimulator", "models")
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return os.path.join(xdg_data_home, "TrafficSimulator", "models")
+    return os.path.join(os.path.expanduser("~"), ".local", "share", "TrafficSimulator", "models")
+
+
+def _model_search_dirs() -> list[str]:
+    """Model directories searched for defaults when loading."""
+    app_dir = _runtime_app_dir()
+    cwd = os.getcwd()
+    machine_dir = _machine_models_dir()
+    ordered = [
+        machine_dir,
+        os.path.join(app_dir, "traffic_simulator models"),
+        os.path.join(app_dir, "models"),
+        os.path.join(cwd, "traffic_simulator models"),
+        os.path.join(cwd, "models"),
+    ]
+    seen: set[str] = set()
+    result: list[str] = []
+    for path in ordered:
+        norm = os.path.normcase(os.path.abspath(path))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        result.append(path)
+    return result
+
+
 def main() -> None:
     sim_clock = SimulationClock(dt=SIM_DT, speed=RENDER_SPEED)
     world = World(traffic_light=TrafficLight())
@@ -55,7 +96,8 @@ def main() -> None:
     step_seconds = env.dt * env.action_repeat
     step_accum = 0.0
     max_steps_per_frame = 3
-    models_dir = os.path.join(os.getcwd(), "models")
+    search_dirs = _model_search_dirs()
+    models_dir = search_dirs[0]
     os.makedirs(models_dir, exist_ok=True)
     default_model_path = os.path.join(models_dir, DEFAULT_BASE_MODEL_NAME)
     bundled_default_model_path = _resource_path("models", DEFAULT_BASE_MODEL_NAME)
@@ -231,6 +273,7 @@ def main() -> None:
             if start_choice == "run":
                 loaded_startup = _load_default_or_prompt_model(
                     models_dir=models_dir,
+                    search_dirs=search_dirs,
                     default_model_path=default_model_path,
                     bundled_default_model_path=bundled_default_model_path,
                     renderer=renderer,
@@ -780,11 +823,14 @@ def _prompt_start_mode(renderer) -> str | None:
 
 def _load_default_or_prompt_model(
     models_dir: str,
+    search_dirs: list[str],
     default_model_path: str,
     bundled_default_model_path: str,
     renderer,
 ) -> tuple[RLController, str] | None:
     candidate_paths = [default_model_path]
+    for search_dir in search_dirs:
+        candidate_paths.append(os.path.join(search_dir, DEFAULT_BASE_MODEL_NAME))
     if bundled_default_model_path not in candidate_paths:
         candidate_paths.append(bundled_default_model_path)
     for candidate_path in candidate_paths:

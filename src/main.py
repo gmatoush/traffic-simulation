@@ -28,24 +28,11 @@ def _runtime_app_dir() -> str:
     return os.getcwd()
 
 
-def _machine_models_dir() -> str:
-    """Per-machine/per-user persistent model directory."""
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "TrafficSimulator", "models")
-    xdg_data_home = os.environ.get("XDG_DATA_HOME")
-    if xdg_data_home:
-        return os.path.join(xdg_data_home, "TrafficSimulator", "models")
-    return os.path.join(os.path.expanduser("~"), ".local", "share", "TrafficSimulator", "models")
-
-
 def _model_search_dirs() -> list[str]:
     """Model directories searched for defaults when loading."""
     app_dir = _runtime_app_dir()
     cwd = os.getcwd()
-    machine_dir = _machine_models_dir()
     ordered = [
-        machine_dir,
         os.path.join(app_dir, "traffic_simulator models"),
         os.path.join(app_dir, "models"),
         os.path.join(cwd, "traffic_simulator models"),

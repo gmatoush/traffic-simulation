@@ -21,20 +21,10 @@ def _resource_path(*parts: str) -> str:
     return os.path.join(base, *parts)
 
 
-def _runtime_app_dir() -> str:
-    """Directory that should hold user-editable runtime files (models, logs, etc.)."""
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.getcwd()
-
-
 def _model_search_dirs() -> list[str]:
-    """Model directories searched for defaults when loading."""
-    app_dir = _runtime_app_dir()
+    """Model directories searched for defaults when loading (local paths only)."""
     cwd = os.getcwd()
     ordered = [
-        os.path.join(app_dir, "traffic_simulator models"),
-        os.path.join(app_dir, "models"),
         os.path.join(cwd, "traffic_simulator models"),
         os.path.join(cwd, "models"),
     ]

@@ -22,8 +22,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install pillow pyinstaller
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
+          python -m pip install pillow pyinstaller pyinstaller-hooks-contrib
+          python -m pip check
 
       - name: Generate app icons
         run: python scripts/generate_icons.py
@@ -33,7 +35,7 @@ jobs:
         run: |
           if (Test-Path build) { Remove-Item build -Recurse -Force }
           if (Test-Path dist) { Remove-Item dist -Recurse -Force }
-          if (Test-Path package) { Remove-Item package -Recurse -Force }
+          if (Test-Path "Traffic Simulator") { Remove-Item "Traffic Simulator" -Recurse -Force }
 
       - name: Build Windows executable
         run: >
@@ -44,14 +46,25 @@ jobs:
           --name TrafficSimulator
           src/main.py
 
-      - name: Package Windows build
+      - name: Assemble Windows bundle
         shell: powershell
         run: |
-          mkdir package
-          Copy-Item dist\TrafficSimulator.exe package\
+          New-Item -ItemType Directory -Path "Traffic Simulator" | Out-Null
+          Copy-Item dist\TrafficSimulator.exe "Traffic Simulator\"
+          Copy-Item README.md "Traffic Simulator\"
+          Copy-Item requirements.txt "Traffic Simulator\"
+          Copy-Item models "Traffic Simulator\traffic_simulator models" -Recurse
+          @"
+          Traffic Simulator (Windows)
+          ---------------------------
+          1) Double-click TrafficSimulator.exe
+          2) If SmartScreen warns, click More info -> Run anyway.
+          3) All required runtime dependencies, assets, and bundled models are included in the executable package.
+          4) User-editable models are in: traffic_simulator models
+          "@ | Set-Content "Traffic Simulator\RUN_ME_FIRST.txt"
 
       - name: Zip Windows package
-        run: Compress-Archive package TrafficSimulator-Windows.zip
+        run: Compress-Archive "Traffic Simulator" TrafficSimulator-Windows.zip
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -77,8 +90,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install pillow pyinstaller
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
+          python -m pip install pillow pyinstaller pyinstaller-hooks-contrib
+          python -m pip check
 
       - name: Generate app icons
         run: python scripts/generate_icons.py
@@ -87,7 +102,7 @@ jobs:
         run: |
           rm -rf build
           rm -rf dist
-          rm -rf package
+          rm -rf "Traffic Simulator"
 
       - name: Build macOS app
         run: >
@@ -98,23 +113,33 @@ jobs:
           --name TrafficSimulator
           src/main.py
 
-      - name: Package macOS build
+      - name: Assemble macOS bundle
         run: |
-          mkdir package
+          mkdir "Traffic Simulator"
           if [ -d "dist/TrafficSimulator.app" ]; then
-            cp -R dist/TrafficSimulator.app package/
+            cp -R dist/TrafficSimulator.app "Traffic Simulator/"
           elif [ -f "dist/TrafficSimulator" ]; then
-            cp dist/TrafficSimulator package/
+            cp dist/TrafficSimulator "Traffic Simulator/"
           else
             echo "No macOS build output found in dist/"
             ls -la dist
             exit 1
           fi
+          cp README.md "Traffic Simulator/"
+          cp requirements.txt "Traffic Simulator/"
+          cp -R models "Traffic Simulator/traffic_simulator models"
+          cat > "Traffic Simulator/RUN_ME_FIRST.txt" << 'EOF'
+          Traffic Simulator (macOS)
+          -------------------------
+          1) Open TrafficSimulator.app (or TrafficSimulator binary if provided).
+          2) If Gatekeeper blocks launch, right-click -> Open the first time.
+          3) All required runtime dependencies, assets, and bundled models are included in the executable package.
+          4) User-editable models are in: traffic_simulator models
+          EOF
 
       - name: Zip macOS package
         run: |
-          cd package
-          zip -r ../TrafficSimulator-macOS.zip .
+          zip -r TrafficSimulator-macOS.zip "Traffic Simulator"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4

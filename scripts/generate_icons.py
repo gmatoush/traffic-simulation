@@ -10,14 +10,19 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
+BRANDING_ICON = ASSETS / "branding" / "traffic_sim.png"
 SOURCE_ICON = ASSETS / "app_icon.png"
 ICO_PATH = ASSETS / "app_icon.ico"
 ICNS_PATH = ASSETS / "app_icon.icns"
 
 
 def _ensure_source_icon() -> None:
-    """Create a simple placeholder app icon if missing."""
+    """Ensure app_icon.png exists, preferring the branded traffic_sim image."""
     if SOURCE_ICON.exists():
+        return
+    if BRANDING_ICON.exists():
+        img = Image.open(BRANDING_ICON).convert("RGBA")
+        img.save(SOURCE_ICON)
         return
     size = 512
     img = Image.new("RGBA", (size, size), (20, 24, 32, 255))

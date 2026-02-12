@@ -499,6 +499,7 @@ class PygameRenderer:
         title: str = "Model Comparison",
         elapsed: float = 0.0,
         compare_speed: float = 1.0,
+        paused: bool = False,
     ) -> None:
         """Render side-by-side model stats without vehicle scene updates."""
         self.screen.fill((0, 0, 0))
@@ -524,6 +525,10 @@ class PygameRenderer:
         self.screen.blit(title_surf, title_rect)
         speed_label = self.font.render(f"Compare Speed: {compare_speed:.2f}x", True, self.palette["hud_text"])
         self.screen.blit(speed_label, (24, 20))
+        self._draw_icon_button(24, 50, 120, 44, "play")
+        self._draw_icon_button(164, 50, 120, 44, "stop")
+        status_label = "Status: Paused" if paused else "Status: Running"
+        self.screen.blit(self.font.render(status_label, True, self.palette["hud_text"]), (300, 62))
         self._draw_slider(210, 22, 220, compare_speed, 0.5, 10.0)
         elapsed_font = pygame.font.Font(None, 48)
         elapsed_surf = elapsed_font.render(f"Elapsed: {elapsed:.1f}s", True, self.palette["hud_text"])

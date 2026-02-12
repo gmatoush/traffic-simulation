@@ -98,6 +98,7 @@ def main() -> None:
     compare_mode = False
     compare_session: dict[str, object] | None = None
     compare_speed = 1.0
+    compare_paused = True
     dragging_compare_speed = False
     show_training_overlay = False
 
@@ -226,6 +227,31 @@ def main() -> None:
             "crashes_per_min": crashes_per_min,
         }
 
+    def _compare_stats_snapshot(agent: dict[str, object], elapsed_total: float) -> dict[str, object]:
+        agent_env = agent["env"]
+        if not isinstance(agent_env, TrafficEnv):
+            raise TypeError("Invalid compare agent env")
+        world_local = agent_env.world
+        avg_wait = 0.0
+        samples = int(agent.get("avg_wait_samples", 0))
+        if samples > 0:
+            avg_wait = float(agent.get("avg_wait_sum", 0.0)) / float(samples)
+        completed = int(agent.get("completed_offset", 0)) + int(getattr(world_local, "completed_vehicles", 0))
+        total_crashes = int(agent.get("crash_offset", 0)) + int(getattr(world_local, "total_crashes", 0))
+        throughput_per_min = 0.0
+        crashes_per_min = 0.0
+        if elapsed_total > 0.0:
+            throughput_per_min = (completed * 60.0) / elapsed_total
+            crashes_per_min = (total_crashes * 60.0) / elapsed_total
+        return {
+            "name": str(agent["name"]),
+            "elapsed": elapsed_total,
+            "avg_wait": avg_wait,
+            "throughput": throughput_per_min,
+            "completed": completed,
+            "crashes_per_min": crashes_per_min,
+        }
+
     def _enter_start_page() -> None:
         nonlocal running
         nonlocal rl_controller
@@ -233,12 +259,14 @@ def main() -> None:
         nonlocal compare_mode
         nonlocal compare_session
         nonlocal compare_speed
+        nonlocal compare_paused
         nonlocal show_training_overlay
 
         rl_controller = None
         loaded_model_name = "None"
         compare_mode = False
         compare_speed = 1.0
+        compare_paused = True
         show_training_overlay = False
         _close_compare_session()
 
@@ -279,9 +307,16 @@ def main() -> None:
                             right_env.close()
                     _show_dialog("Compare Models Failed", f"Could not start comparison:\n{exc}")
                     continue
-                compare_session = {"left": left_state, "right": right_state, "elapsed": 0.0}
+                compare_session = {
+                    "left": left_state,
+                    "right": right_state,
+                    "elapsed": 0.0,
+                    "left_stats": _compare_stats_snapshot(left_state, 0.0),
+                    "right_stats": _compare_stats_snapshot(right_state, 0.0),
+                }
                 rl_controller = left_state["controller"]
                 loaded_model_name = str(left_state["name"])
+                compare_paused = True
                 compare_mode = True
                 return
             if start_choice == "train":
@@ -362,8 +397,11 @@ def main() -> None:
             elif event.type == pygame.VIDEORESIZE:
                 renderer.resize(event.w, event.h)
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE and not compare_mode:
-                    paused = not paused
+                if event.key == pygame.K_SPACE:
+                    if compare_mode:
+                        compare_paused = not compare_paused
+                    else:
+                        paused = not paused
                 elif event.key == pygame.K_PERIOD and paused and rl_controller is not None and not compare_mode:
                     obs, _, terminated, truncated, _ = env.step(rl_controller.act(obs))
                     if terminated or truncated:
@@ -395,6 +433,14 @@ def main() -> None:
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if compare_mode:
                     compare_slider = _compare_speed_slider_rect(renderer.width, renderer.height)
+                    compare_play_btn = _compare_play_button_rect(renderer.width, renderer.height)
+                    compare_stop_btn = _compare_stop_button_rect(renderer.width, renderer.height)
+                    if compare_play_btn.collidepoint(event.pos):
+                        compare_paused = False
+                        continue
+                    if compare_stop_btn.collidepoint(event.pos):
+                        compare_paused = True
+                        continue
                     if compare_slider.collidepoint(event.pos):
                         dragging_compare_speed = True
                         compare_speed = _slider_value(event.pos[0], compare_slider, 0.5, 10.0)
@@ -474,10 +520,13 @@ def main() -> None:
                         "left": left_state,
                         "right": right_state,
                         "elapsed": 0.0,
+                        "left_stats": _compare_stats_snapshot(left_state, 0.0),
+                        "right_stats": _compare_stats_snapshot(right_state, 0.0),
                     }
                     if rl_controller is None:
                         rl_controller = left_state["controller"]
                         loaded_model_name = str(left_state["name"])
+                    compare_paused = True
                     compare_mode = True
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 dragging_speed = False
@@ -531,16 +580,29 @@ def main() -> None:
                 compare_mode = False
                 _close_compare_session()
                 continue
-            compare_elapsed = float(compare_session.get("elapsed", 0.0)) + (real_dt * compare_speed)
-            compare_session["elapsed"] = compare_elapsed
-            left_stats = _step_compare_agent(left_state, real_dt, compare_elapsed, compare_speed)
-            right_stats = _step_compare_agent(right_state, real_dt, compare_elapsed, compare_speed)
+            compare_elapsed = float(compare_session.get("elapsed", 0.0))
+            if not compare_paused:
+                compare_elapsed += real_dt * compare_speed
+                compare_session["elapsed"] = compare_elapsed
+                left_stats = _step_compare_agent(left_state, real_dt, compare_elapsed, compare_speed)
+                right_stats = _step_compare_agent(right_state, real_dt, compare_elapsed, compare_speed)
+                compare_session["left_stats"] = left_stats
+                compare_session["right_stats"] = right_stats
+            left_stats = compare_session.get("left_stats")
+            right_stats = compare_session.get("right_stats")
+            if not isinstance(left_stats, dict):
+                left_stats = _compare_stats_snapshot(left_state, compare_elapsed)
+                compare_session["left_stats"] = left_stats
+            if not isinstance(right_stats, dict):
+                right_stats = _compare_stats_snapshot(right_state, compare_elapsed)
+                compare_session["right_stats"] = right_stats
             renderer.render_model_comparison(
                 left_stats,
                 right_stats,
                 title="Model Comparison",
                 elapsed=compare_elapsed,
                 compare_speed=compare_speed,
+                paused=compare_paused,
             )
             continue
 
@@ -703,6 +765,18 @@ def _compare_speed_slider_rect(width: int, height: int):
     import pygame
 
     return pygame.Rect(210, 22, 220, 16)
+
+
+def _compare_play_button_rect(width: int, height: int):
+    import pygame
+
+    return pygame.Rect(24, 50, 120, 44)
+
+
+def _compare_stop_button_rect(width: int, height: int):
+    import pygame
+
+    return pygame.Rect(164, 50, 120, 44)
 
 
 def _slider_value(mouse_x: int, rect, vmin: float, vmax: float) -> float:

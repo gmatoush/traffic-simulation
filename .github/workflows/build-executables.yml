@@ -106,12 +106,23 @@ jobs:
 
       - name: Build macOS app
         run: >
-          pyinstaller --onefile --windowed
+          pyinstaller --windowed
           --icon=assets/app_icon.icns
           --add-data "assets:assets"
           --add-data "models:models"
           --name TrafficSimulator
           src/main.py
+
+      - name: Ad-hoc sign macOS app bundle
+        run: |
+          if [ -d "dist/TrafficSimulator.app" ]; then
+            codesign --force --deep --sign - "dist/TrafficSimulator.app"
+            codesign --verify --deep --strict --verbose=2 "dist/TrafficSimulator.app"
+          else
+            echo "TrafficSimulator.app not found"
+            ls -la dist
+            exit 1
+          fi
 
       - name: Assemble macOS bundle
         run: |
@@ -133,8 +144,10 @@ jobs:
           -------------------------
           1) Open TrafficSimulator.app (or TrafficSimulator binary if provided).
           2) If Gatekeeper blocks launch, right-click -> Open the first time.
-          3) All required runtime dependencies, assets, and bundled models are included in the executable package.
-          4) User-editable models are in: traffic_simulator models
+          3) If needed, remove quarantine in Terminal:
+             xattr -dr com.apple.quarantine "TrafficSimulator.app"
+          4) All required runtime dependencies, assets, and bundled models are included in the executable package.
+          5) User-editable models are in: traffic_simulator models
           EOF
 
       - name: Zip macOS package

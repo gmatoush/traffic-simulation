@@ -5,8 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import random
+import sys
 
 import pygame
+
+
+def _resource_path(*parts: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+    return os.path.join(base, *parts)
 
 
 @dataclass
@@ -55,8 +61,7 @@ class PygameRenderer:
         self._static_scene_surface = None
 
     def _load_vehicle_sprites(self) -> None:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        cars_dir = os.path.join(base_dir, "assets", "cars")
+        cars_dir = _resource_path("assets", "cars")
         normal_dir = os.path.join(cars_dir, "normal_cars")
         emergency_dir = os.path.join(cars_dir, "emergency")
         self._sprite_pool = {
@@ -67,9 +72,8 @@ class PygameRenderer:
         }
 
     def _load_control_icons(self) -> None:
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        play_path = os.path.join(base_dir, "assets", "start_button.png")
-        stop_path = os.path.join(base_dir, "assets", "stop_button.png")
+        play_path = _resource_path("assets", "start_button.png")
+        stop_path = _resource_path("assets", "stop_button.png")
         icons: dict[str, pygame.Surface] = {}
         try:
             if os.path.isfile(play_path):
@@ -82,8 +86,7 @@ class PygameRenderer:
 
     def _set_window_icon(self) -> None:
         """Set the pygame window icon if an app icon is available."""
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        icon_path = os.path.join(base_dir, "assets", "app_icon.png")
+        icon_path = _resource_path("assets", "app_icon.png")
         if not os.path.isfile(icon_path):
             return
         try:

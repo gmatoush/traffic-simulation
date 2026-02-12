@@ -1,6 +1,7 @@
 name: Build Traffic Simulator
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -38,27 +39,28 @@ jobs:
         run: >
           pyinstaller --onefile --windowed
           --add-data "assets;assets"
+          --add-data "models;models"
           --icon=assets/app_icon.ico
           --name TrafficSimulator
           src/main.py
 
-      - name: Create Windows shortcut
+      - name: Package Windows build
         shell: powershell
         run: |
           mkdir package
           Copy-Item dist\TrafficSimulator.exe package\
-          Copy-Item assets package\assets -Recurse
-          $WshShell = New-Object -ComObject WScript.Shell
-          $Shortcut = $WshShell.CreateShortcut("package\Traffic Simulator.lnk")
-          $Shortcut.TargetPath = "$PWD\package\TrafficSimulator.exe"
-          $Shortcut.WorkingDirectory = "$PWD\package"
-          $Shortcut.IconLocation = "$PWD\package\TrafficSimulator.exe"
-          $Shortcut.Save()
 
       - name: Zip Windows package
         run: Compress-Archive package TrafficSimulator-Windows.zip
 
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrafficSimulator-Windows
+          path: TrafficSimulator-Windows.zip
+
       - name: Upload Windows to Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: TrafficSimulator-Windows.zip
@@ -89,24 +91,39 @@ jobs:
 
       - name: Build macOS app
         run: >
-          pyinstaller --windowed
+          pyinstaller --onefile --windowed
           --icon=assets/app_icon.icns
           --add-data "assets:assets"
+          --add-data "models:models"
           --name TrafficSimulator
           src/main.py
 
-      - name: Create macOS alias
+      - name: Package macOS build
         run: |
           mkdir package
-          cp -R dist/TrafficSimulator.app package/
-          ln -s TrafficSimulator.app package/Traffic\ Simulator
+          if [ -d "dist/TrafficSimulator.app" ]; then
+            cp -R dist/TrafficSimulator.app package/
+          elif [ -f "dist/TrafficSimulator" ]; then
+            cp dist/TrafficSimulator package/
+          else
+            echo "No macOS build output found in dist/"
+            ls -la dist
+            exit 1
+          fi
 
       - name: Zip macOS package
         run: |
           cd package
           zip -r ../TrafficSimulator-macOS.zip .
 
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrafficSimulator-macOS
+          path: TrafficSimulator-macOS.zip
+
       - name: Upload macOS to Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: TrafficSimulator-macOS.zip

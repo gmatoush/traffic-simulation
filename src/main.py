@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import sys
 
 from config.sim_config import HEADLESS_STEPS, RENDER_ENABLED, RENDER_SPEED, SIM_DT
 from env.traffic_env import TrafficEnv
@@ -13,6 +14,11 @@ from sim.traffic_light import TrafficLight
 from sim.world import World
 
 DEFAULT_BASE_MODEL_NAME = "traffic_ppo_base.zip"
+
+
+def _resource_path(*parts: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.getcwd())
+    return os.path.join(base, *parts)
 
 
 def main() -> None:
@@ -52,6 +58,7 @@ def main() -> None:
     models_dir = os.path.join(os.getcwd(), "models")
     os.makedirs(models_dir, exist_ok=True)
     default_model_path = os.path.join(models_dir, DEFAULT_BASE_MODEL_NAME)
+    bundled_default_model_path = _resource_path("models", DEFAULT_BASE_MODEL_NAME)
     elapsed_offset = 0.0
     completed_offset = 0
     crash_offset = 0
@@ -225,6 +232,7 @@ def main() -> None:
                 loaded_startup = _load_default_or_prompt_model(
                     models_dir=models_dir,
                     default_model_path=default_model_path,
+                    bundled_default_model_path=bundled_default_model_path,
                     renderer=renderer,
                 )
                 if loaded_startup is not None:
@@ -616,7 +624,7 @@ def _draw_branding_splash(
     import pygame
 
     renderer._draw_static_scene()
-    branding_path = os.path.join(os.getcwd(), "assets", "branding", "traffic_sim.png")
+    branding_path = _resource_path("assets", "branding", "traffic_sim.png")
     image = None
     if os.path.isfile(branding_path):
         try:
@@ -771,17 +779,25 @@ def _prompt_start_mode(renderer) -> str | None:
 
 
 def _load_default_or_prompt_model(
-    models_dir: str, default_model_path: str, renderer
+    models_dir: str,
+    default_model_path: str,
+    bundled_default_model_path: str,
+    renderer,
 ) -> tuple[RLController, str] | None:
-    if os.path.isfile(default_model_path):
+    candidate_paths = [default_model_path]
+    if bundled_default_model_path not in candidate_paths:
+        candidate_paths.append(bundled_default_model_path)
+    for candidate_path in candidate_paths:
+        if not os.path.isfile(candidate_path):
+            continue
         try:
-            return RLController(algo="PPO", model_path=default_model_path), os.path.basename(
-                default_model_path
+            return RLController(algo="PPO", model_path=candidate_path), os.path.basename(
+                candidate_path
             )
         except Exception:
             _show_dialog(
                 "Default Model Failed",
-                f"Failed to load default base model:\n{default_model_path}\nChoose another model.",
+                f"Failed to load default base model:\n{candidate_path}\nChoose another model.",
             )
 
     loaded = _prompt_load_ppo_model(models_dir, renderer)
